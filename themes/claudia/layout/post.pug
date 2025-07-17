@@ -3,6 +3,8 @@ block append head
   link(rel='stylesheet', href= url_for('/style/post.css'))
   link(rel='stylesheet', href= url_for('/style/themes/highlight-theme-light.css'))
   link(rel='stylesheet', href= url_for('/style/common/jquery.fancybox.min.css'))
+  // Style for sidebar widgets
+  link(rel='stylesheet', href= url_for('/style/widget-post-list.css'))
   script(src= url_for("/js/highlight.pack.js"))
   meta(name="description", content=truncate( strip_html(page.content), {length: 360, omission: '..'} ))
   if theme.comment_valine && theme.comment_valine.enable
@@ -17,7 +19,11 @@ block content
     - var tocContent = toc(page.content, {list_number: false})
     main.container.is-max-widescreen.content.section.post-page.pt-4.px-4
         .columns.is-flex-desktop.is-justify-content-center.is-flex-direction-row-reverse
-            .column.is-3.is-hidden-mobile(class= tocContent.length < 1 && 'is-hidden')!= tocContent
+            .column.is-3.is-hidden-mobile(class= tocContent.length < 1 && 'is-hidden')
+                div(style="position: sticky; top: 50px;")
+                    != tocContent
+                    if theme.widgets.includes('profile')
+                        include widget/widget-profile
             .column.is-9
                 header.my-4
                     if page.tags && page.tags.length > 0

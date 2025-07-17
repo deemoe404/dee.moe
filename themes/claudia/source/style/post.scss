@@ -101,13 +101,10 @@ $lineColor: var(--border-line-color);
   }
 
   .toc {
-    position: sticky;
-    top: 60px;
-
     margin-left: 0;
     margin-right: 0;
     padding-left: 15px;
-    height: calc(100vh - 100px);
+    max-height: calc(100vh - 100px);
 
     overflow: auto;
     list-style: none!important;
@@ -128,6 +125,12 @@ $lineColor: var(--border-line-color);
         color: $activeColor!important;
       }
     }
+  }
+
+  .profile-widget {
+    margin-top: 15px;
+    position: sticky;
+    top: 50px;
   }
 
   :target {

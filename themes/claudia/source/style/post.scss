@@ -130,6 +130,11 @@ $lineColor: var(--border-line-color);
     }
   }
 
+  .profile-widget {
+    position: sticky;
+    top: 60px;
+  }
+
   :target {
     padding-top: 60px;
     margin-top: -60px!important;

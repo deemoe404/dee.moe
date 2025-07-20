@@ -9,7 +9,7 @@ categories: Technology
 
 > This article is still under construction. The final version will be released in the near future.
 
-> ### TL;DR
+> **TL;DR**
 >
 > I aimed to streamline my workflow using a single machine but encountered limitations across platforms—Windows became unstable, Arch required excessive maintenance, and macOS lacked NVIDIA GPU support.
 >
@@ -66,7 +66,7 @@ That’s when things started to click.
                               +-----------------+
 ```
 
-Back on Windows, I used to manage several WSL instances, mainly because some older software only worked on legacy systems (see [this issue](https://github.com/Pang-Yatian/Point-MAE/pull/64))).
+Back on Windows, I used to manage several WSL instances, mainly because some older software only worked on legacy systems (see [this issue](https://github.com/Pang-Yatian/Point-MAE/pull/64)).
 
 *And no, please don’t ask why I didn’t use Docker on Windows—the networking issues nearly drove me insane back then. I don’t know if things have improved since, maybe they have.*
 
@@ -81,6 +81,4 @@ After setting up SSH credentials and Docker on my workstation, I was immediately
   - Docker configurations, port mappings, environment variables—all neatly packaged in one clear place.
 - **Effortless Port Forwarding.** Dev container even handles port forwarding, so I could connect to noVNC inside the container from my Mac using just `localhost`!
 
-## You never get rid of GUI
-
-
+## You Never Get Rid of GUI

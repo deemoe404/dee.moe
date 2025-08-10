@@ -88,7 +88,7 @@ The amplitude of the input signal was determined by applying a fixed voltage to 
 
 Finally, the obtained real and imaginary frequency data were imported into Matlab to generate the system's Bode plot for initial validation. The resulting plot is shown in Fig below.
 
-![Bode Plot](bode.png "Bode Plot")
+![Bode Plot](bode.jpg "Bode Plot")
 
 The complete dataset and the data processing program can be found in the appendix.
 

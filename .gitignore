@@ -6,3 +6,5 @@ scaffolds/
 db.json
 Template.md
 dee.moe.code-workspace
+.vscode/
+package-lock.json

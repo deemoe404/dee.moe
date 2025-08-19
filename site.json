@@ -1,28 +1,33 @@
 {
   "siteTitle": {
-    "default": "NanoSite",
-    "zh": "微站",
-    "ja": "ナノサイト"
+    "default": "deemoe's journal",
+    "zh": "deemoe 的日志",
+    "ja": "deemoe のジャーナル"
   },
   "siteSubtitle": {
-    "default": "Just Markdown. Just a website.",
-    "zh": "写下 Markdown，就是你的网站。",
-    "ja": "書くだけ、Markdown。それがサイトになる。"
+    "default": "Thanks for playing my game.",
+    "zh": "眼见何事，情系何处，身在何方，心思何人"
   },
   "siteDescription": {
-    "default": "NanoSite - Just Markdown. Just a website.",
-    "zh": "微站 - 写下 Markdown，就是你的网站。",
-    "ja": "ナノサイト - 書くだけ、Markdown。それがサイトになる。"
+    "default": "deemoe's journal"
   },
-  "resourceURL": "https://nano.dee.moe/wwwroot/",
+  "resourceURL": "https://dee.moe/wwwroot/",
   "siteKeywords": {
     "default": "static blog, markdown, github pages, blog"
   },
-  "avatar": "assets/avatar.jpeg",
+  "avatar": "assets/avatar.png",
   "profileLinks": [
     {
       "label": "GitHub",
-      "href": "https://github.com/deemoe404/NanoSite"
+      "href": "https://github.com/deemoe404"
+    },
+    {
+      "label": "ORCID",
+      "href": "https://orcid.org/0009-0005-4213-5418"
+    },
+    {
+      "label": "E-Mail",
+      "href": "mailto:deemoe404@gmail.com"
     }
   ],
   "contentOutdatedDays": 180,

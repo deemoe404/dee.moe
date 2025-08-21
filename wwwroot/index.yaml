@@ -1,13 +1,5 @@
 # yaml-language-server: $schema=../assets/schema/index.json
 
-nanoSite:
-  en: post/meet-nanosite/main_en.md
-  zh: post/meet-nanosite/main_zh.md
-  ja: post/meet-nanosite/main_ja.md
-nanodoc:
-  en: post/meet-nanosite/doc_en.md
-  zh: post/meet-nanosite/doc_zh.md
-  ja: post/meet-nanosite/doc_ja.md
 headless:
   en: post/headless.md
 volcal_baseline:

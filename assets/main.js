@@ -3,13 +3,18 @@ import { setupAnchors, setupTOC } from './js/toc.js';
 import { applySavedTheme, bindThemeToggle, bindSeoGenerator, bindThemePackPicker, mountThemeControls, refreshLanguageSelector, applyThemeConfig } from './js/theme.js';
 import { setupSearch } from './js/search.js';
 import { extractExcerpt, computeReadTime } from './js/content.js';
-import { getQueryVariable, setDocTitle, setBaseSiteTitle, cardImageSrc, fallbackCover, renderTags, slugifyTab, escapeHtml, formatDisplayDate } from './js/utils.js';
+import { getQueryVariable, setDocTitle, setBaseSiteTitle, cardImageSrc, fallbackCover, renderTags, slugifyTab, escapeHtml, formatDisplayDate, formatBytes, renderSkeletonArticle, isModifiedClick } from './js/utils.js';
 import { initI18n, t, withLangParam, loadLangJson, loadContentJson, loadTabsJson, getCurrentLang, normalizeLangKey } from './js/i18n.js';
 import { updateSEO, extractSEOFromMarkdown } from './js/seo.js';
 import { initErrorReporter, setReporterContext, showErrorOverlay } from './js/errors.js';
 import { initSyntaxHighlighting } from './js/syntax-highlight.js';
+import { fetchConfigWithYamlFallback } from './js/yaml.js';
 import { applyMasonry, updateMasonryItem, calcAndSetSpan, toPx, debounce } from './js/masonry.js';
 import { aggregateTags, renderTagSidebar, setupTagTooltips } from './js/tags.js';
+import { installLightbox } from './js/lightbox.js';
+import { renderPostNav } from './js/post-nav.js';
+import { prefersReducedMotion, getArticleTitleFromMain } from './js/dom-utils.js';
+import { renderPostMetaCard, renderOutdatedCard } from './js/templates.js';
 
 // Lightweight fetch helper
 const getFile = (filename) => fetch(filename).then(resp => { if (!resp.ok) throw new Error(`HTTP ${resp.status}`); return resp.text(); });
@@ -22,12 +27,10 @@ let postsIndexCache = {};
 let allowedLocations = new Set();
 // Cross-language location aliases: any known variant -> preferred for current lang
 let locationAliasMap = new Map();
-const PAGE_SIZE = 8;
+// Default page size; can be overridden by site.yaml (pageSize/postsPerPage)
+let PAGE_SIZE = 8;
 
 // --- UI helpers: smooth show/hide (height + opacity) ---
-function prefersReducedMotion() {
-  try { return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) { return false; }
-}
 
 function smoothShow(el) {
   if (!el) return;
@@ -170,13 +173,12 @@ function ensureAutoHeight(el) {
   } catch (_) {}
 }
 
-// --- Site config (root-level site.json) ---
+// --- Site config (root-level site.yaml) ---
 let siteConfig = {};
 async function loadSiteConfig() {
   try {
-    const r = await fetch('site.json');
-    if (!r.ok) return {};
-    return await r.json();
+    // YAML only
+    return await fetchConfigWithYamlFallback(['site.yaml', 'site.yml']);
   } catch (_) { return {}; }
 }
 
@@ -369,13 +371,7 @@ async function checkImageSize(url, timeoutMs = 4000) {
   }
 }
 
-function formatBytes(n) {
-  if (!n && n !== 0) return '';
-  const kb = n / 1024;
-  if (kb < 1024) return `${Math.round(kb)} KB`;
-  const mb = kb / 1024;
-  return `${mb.toFixed(mb >= 10 ? 0 : 1)} MB`;
-}
+// formatBytes moved to utils.js
 
 async function warnLargeImagesIn(container, cfg = {}) {
   try {
@@ -787,86 +783,11 @@ function sequentialLoadCovers(container, maxConcurrent = 1) {
   } catch (_) {}
 }
 
-function renderSkeletonArticle() {
-  return `
-    <div class="skeleton-article" aria-busy="true" aria-live="polite">
-      <div class="skeleton-block skeleton-title w-70"></div>
-      <div class="skeleton-block skeleton-line w-95"></div>
-      <div class="skeleton-block skeleton-line w-90"></div>
-      <div class="skeleton-block skeleton-line w-85"></div>
-      <div class="skeleton-block skeleton-line w-40"></div>
-      <div class="skeleton-block skeleton-image w-100"></div>
-      <div class="skeleton-block skeleton-line w-90"></div>
-      <div class="skeleton-block skeleton-line w-95"></div>
-      <div class="skeleton-block skeleton-line w-80"></div>
-      <div class="skeleton-block skeleton-line w-60"></div>
-      <div style="margin: 1.25rem 0;">
-        <div class="skeleton-block skeleton-line w-30" style="height: 1.25rem; margin-bottom: 0.75rem;"></div>
-        <div class="skeleton-block skeleton-line w-85"></div>
-        <div class="skeleton-block skeleton-line w-75"></div>
-        <div class="skeleton-block skeleton-line w-90"></div>
-      </div>
-      <div class="skeleton-block skeleton-line w-95"></div>
-      <div class="skeleton-block skeleton-line w-80"></div>
-      <div class="skeleton-block skeleton-line w-45"></div>
-    </div>`;
-}
+// renderSkeletonArticle moved to utils.js
 
-function getArticleTitleFromMain() {
-  const h = document.querySelector('#mainview h1, #mainview h2, #mainview h3');
-  if (!h) return null;
-  const clone = h.cloneNode(true);
-  const anchors = clone.querySelectorAll('a.anchor');
-  anchors.forEach(a => a.remove());
-  const text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
-  return text.replace(/^#+\s*/, '').trim();
-}
+// RenderPostMetaCard moved to ./js/templates.js
 
-// Render a metadata card (title/date/read time/tags) for the current post
-function renderPostMetaCard(title, meta, markdown) {
-  try {
-    const safeTitle = escapeHtml(String(title || ''));
-    const hasDate = meta && meta.date;
-    const dateHtml = hasDate ? `<span class="card-date">${escapeHtml(formatDisplayDate(meta.date))}</span>` : '';
-    let readHtml = '';
-    try {
-      const minutes = computeReadTime(String(markdown || ''), 200);
-      readHtml = `<span class="card-read">${minutes} ${t('ui.minRead')}</span>`;
-    } catch (_) {}
-    const parts = [];
-    if (dateHtml) parts.push(dateHtml);
-    if (readHtml) parts.push(readHtml);
-    const metaLine = parts.length ? `<div class="post-meta-line">${parts.join('<span class="card-sep">•</span>')}</div>` : '';
-    const excerptHtml = (meta && meta.excerpt) ? `<div class="post-meta-excerpt">${escapeHtml(String(meta.excerpt))}</div>` : '';
-    const tags = meta ? renderTags(meta.tag) : '';
-    return `<section class="post-meta-card" aria-label="Post meta">
-      <div class="post-meta-title">${safeTitle}</div>
-      <button type="button" class="post-meta-copy" aria-label="${t('ui.copyLink')}" title="${t('ui.copyLink')}">${t('ui.copyLink')}</button>
-      ${metaLine}
-      ${excerptHtml}
-      ${tags || ''}
-    </section>`;
-  } catch (_) {
-    return '';
-  }
-}
-
-// Render an outdated warning card if the post date exceeds the configured threshold
-function renderOutdatedCard(meta) {
-  try {
-    const hasDate = meta && meta.date;
-    if (!hasDate) return '';
-    const published = new Date(String(meta.date));
-    if (isNaN(published.getTime())) return '';
-    const diffDays = Math.floor((Date.now() - published.getTime()) / (1000 * 60 * 60 * 24));
-    const threshold = (siteConfig && Number.isFinite(Number(siteConfig.contentOutdatedDays))) ? Number(siteConfig.contentOutdatedDays) : 180;
-    if (diffDays < threshold) return '';
-    return `<section class="post-outdated-card" role="note">
-      <div class="post-outdated-content">${t('ui.outdatedWarning')}</div>
-      <button type="button" class="post-outdated-close" aria-label="${t('ui.close')}" title="${t('ui.close')}">×</button>
-    </section>`;
-  } catch (_) { return ''; }
-}
+// RenderOutdatedCard moved to ./js/templates.js
 
 let hasInitiallyRendered = false;
 
@@ -933,7 +854,7 @@ function renderTabs(activeSlug, searchQuery) {
       const label = raw ? escapeHtml(raw.length > 28 ? raw.slice(0,25) + '…' : raw) : t('ui.postTab');
       compact += `<span class="tab active" data-slug="post">${label}</span>`;
     } else if (activeSlug && activeSlug !== 'posts') {
-      // Active static tab from tabs.json
+      // Active static tab from tabs.yaml
       const info = tabsBySlug[activeSlug];
       const label = info && info.title ? info.title : activeSlug;
       compact += make(activeSlug, label).replace('"tab ', '"tab active ');
@@ -1252,11 +1173,12 @@ function displayPost(postname) {
   const postMetadata = (Object.entries(postsIndexCache || {}) || []).find(([, v]) => v && v.location === postname)?.[1] || {};
   // Tentatively render meta card with fallback title first; we'll update title after reading h1
   const preTitle = fallback;
-  const outdatedCardHtml = renderOutdatedCard(postMetadata);
+  const outdatedCardHtml = renderOutdatedCard(postMetadata, siteConfig);
   const metaCardHtml = renderPostMetaCard(preTitle, postMetadata, markdown);
   // Render outdated card + meta card + main content so we can read first heading reliably
   const mainEl = document.getElementById('mainview');
   if (mainEl) mainEl.innerHTML = outdatedCardHtml + metaCardHtml + output.post;
+  try { renderPostNav('#mainview', postsIndexCache, postname); } catch (_) {}
   try { hydratePostImages('#mainview'); } catch (_) {}
     try { applyLazyLoadingIn('#mainview'); } catch (_) {}
     // After images are in DOM, run large-image watchdog if enabled in site config
@@ -1291,7 +1213,7 @@ function displayPost(postname) {
       });
     }
   } catch (_) {}
-  // Always use the localized title from index.json for display/meta/tab labels
+  // Always use the localized title from index.yaml for display/meta/tab labels
   const articleTitle = fallback;
     // If title changed after parsing, update the card's title text
     try {
@@ -1339,6 +1261,19 @@ function displayPost(postname) {
     if (contentEl) contentEl.classList.remove('loading');
     if (sidebarEl) sidebarEl.classList.remove('loading');
     
+    // Surface an overlay for missing post (e.g., 404)
+    try {
+      const err = new Error((t('errors.postNotFoundBody') || 'The requested post could not be loaded.'));
+      try { err.name = 'Warning'; } catch(_) {}
+      showErrorOverlay(err, {
+        message: err.message,
+        origin: 'view.post.notfound',
+        filename: 'wwwroot/' + postname,
+        assetUrl: 'wwwroot/' + postname,
+        id: postname
+      });
+    } catch (_) {}
+
     document.getElementById('tocview').innerHTML = '';
     const backHref = withLangParam('?tab=posts');
     document.getElementById('mainview').innerHTML = `<div class=\"notice error\"><h3>${t('errors.postNotFoundTitle')}</h3><p>${t('errors.postNotFoundBody')} <a href=\"${backHref}\">${t('ui.backToAllPosts')}</a>.</p></div>`;
@@ -1425,7 +1360,7 @@ function displayIndex(parsed) {
     const el = cards[idx];
     if (!el) return;
     const exEl = el.querySelector('.card-excerpt');
-    // Prefer explicit excerpt from index.json when available
+    // Prefer explicit excerpt from index.yaml when available
     if (exEl && meta && meta.excerpt) {
       try { exEl.textContent = String(meta.excerpt); } catch (_) {}
     }
@@ -1553,7 +1488,7 @@ function displaySearch(query) {
     const el = cards[idx];
     if (!el) return;
     const exEl = el.querySelector('.card-excerpt');
-    // Prefer explicit excerpt from index.json when available
+    // Prefer explicit excerpt from index.yaml when available
     if (exEl && meta && meta.excerpt) {
       try { exEl.textContent = String(meta.excerpt); } catch (_) {}
     }
@@ -1636,7 +1571,7 @@ function displayStaticTab(slug) {
   try { hydratePostVideos('#mainview'); } catch (_) {}
   try { initSyntaxHighlighting(); } catch (_) {}
   try { renderTagSidebar(postsIndexCache); } catch (_) {}
-  // Always use the title defined in tabs.json for the browser/SEO title,
+  // Always use the title defined in tabs.yaml for the browser/SEO title,
   // instead of deriving it from the first heading in the markdown.
   const pageTitle = tab.title;
       
@@ -1652,11 +1587,20 @@ function displayStaticTab(slug) {
       
       try { setDocTitle(pageTitle); } catch (_) {}
     })
-    .catch(() => {
+    .catch((e) => {
       // 移除加载状态类，即使出错也要移除
       if (contentEl) contentEl.classList.remove('loading');
       if (sidebarEl) sidebarEl.classList.remove('loading');
       
+      // Surface an overlay for missing static tab page
+      try {
+        const url = 'wwwroot/' + tab.location;
+        const msg = (t('errors.pageUnavailableBody') || 'Could not load this tab.') + (e && e.message ? ` (${e.message})` : '');
+        const err = new Error(msg);
+        try { err.name = 'Warning'; } catch(_) {}
+        showErrorOverlay(err, { message: msg, origin: 'view.tab.unavailable', tagName: 'md', filename: url, assetUrl: url, tab: slug });
+      } catch (_) {}
+
       document.getElementById('mainview').innerHTML = `<div class=\"notice error\"><h3>${t('errors.pageUnavailableTitle')}</h3><p>${t('errors.pageUnavailableBody')}</p></div>`;
       setDocTitle(t('ui.pageUnavailable'));
     });
@@ -1782,9 +1726,7 @@ function addTabClickAnimation(tab) {
 }
 
 // Intercept in-app navigation and use History API
-function isModifiedClick(event) {
-  return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0;
-}
+// isModifiedClick moved to utils.js
 
 document.addEventListener('click', (e) => {
   const a = e.target && e.target.closest ? e.target.closest('a') : null;
@@ -1861,9 +1803,14 @@ window.addEventListener('resize', () => {
 // 3) Load localized index/tabs JSON with fallback chain and render
 // Initialize i18n first so localized UI renders correctly
 const defaultLang = (document.documentElement && document.documentElement.getAttribute('lang')) || 'en';
-initI18n({ defaultLang });
+// Bootstrap i18n without persisting to localStorage so site.yaml can
+// still override the default language on first load.
+initI18n({ defaultLang, persist: false });
 // Expose translate helper for modules that don't import i18n directly
 try { window.__ns_t = (key) => t(key); } catch (_) { /* no-op */ }
+
+// Install error reporter early to catch resource 404s (e.g., theme CSS, images)
+try { initErrorReporter({}); } catch (_) {}
 
 // Ensure theme controls are present, then apply and bind
 mountThemeControls();
@@ -1871,32 +1818,188 @@ applySavedTheme();
 bindThemeToggle();
 bindSeoGenerator();
 bindThemePackPicker();
+// Install lightweight image viewer (delegated; safe to call once)
+try { installLightbox({ root: '#mainview' }); } catch (_) {}
 // Localize search placeholder ASAP
 try { const input = document.getElementById('searchInput'); if (input) input.setAttribute('placeholder', t('sidebar.searchPlaceholder')); } catch (_) {}
 // Observe viewport changes for responsive tabs
 setupResponsiveTabsObserver();
 
-Promise.allSettled([
-  // Load transformed posts index for current UI language
-  loadContentJson('wwwroot', 'index'),
-  // Load tabs (may be unified or legacy)
-  loadTabsJson('wwwroot', 'tabs'),
-  // Load site config
-  loadSiteConfig(),
-  // Also fetch the raw index.json to collect all variant locations across languages
-  (async () => {
+// Soft reset to the site's default language without full reload
+async function softResetToSiteDefaultLanguage() {
+  try {
+    const def = (siteConfig && (siteConfig.defaultLanguage || siteConfig.defaultLang)) || defaultLang || 'en';
+    // Switch language immediately (do not persist to mimic reset semantics)
+    initI18n({ lang: String(def), persist: false });
+    // Reflect placeholder promptly
+    try { const input = document.getElementById('searchInput'); if (input) input.setAttribute('placeholder', t('sidebar.searchPlaceholder')); } catch (_) {}
+    // Update URL to drop any lang param so defaults apply going forward
+    try { const u = new URL(window.location.href); u.searchParams.delete('lang'); history.replaceState(history.state, document.title, u.toString()); } catch (_) {}
+  } catch (_) {}
+  // Reload localized content and tabs for the new language, then rerender
+  try {
+    const results = await Promise.allSettled([
+      loadContentJson('wwwroot', 'index'),
+      loadTabsJson('wwwroot', 'tabs'),
+      (async () => { try { const obj = await fetchConfigWithYamlFallback(['wwwroot/index.yaml','wwwroot/index.yml']); return (obj && typeof obj === 'object') ? obj : null; } catch (_) { return null; } })()
+    ]);
+    const posts = results[0].status === 'fulfilled' ? (results[0].value || {}) : {};
+    const tabs = results[1].status === 'fulfilled' ? (results[1].value || {}) : {};
+    const rawIndex = results[2] && results[2].status === 'fulfilled' ? (results[2].value || null) : null;
+
+    // Rebuild tabs and caches (mirrors boot path)
+    tabsBySlug = {};
+    stableToCurrentTabSlug = {};
+    for (const [title, cfg] of Object.entries(tabs)) {
+      const unifiedSlug = (cfg && typeof cfg === 'object' && cfg.slug) ? String(cfg.slug) : null;
+      const slug = unifiedSlug || slugifyTab(title);
+      const loc = typeof cfg === 'string' ? cfg : String(cfg.location || '');
+      if (!loc) continue;
+      tabsBySlug[slug] = { title, location: loc };
+      const baseKey = (unifiedSlug ? unifiedSlug : slug);
+      stableToCurrentTabSlug[baseKey] = slug;
+    }
+
+    const baseAllowed = new Set(Object.values(posts).map(v => String(v.location)));
+    if (rawIndex && typeof rawIndex === 'object' && !Array.isArray(rawIndex)) {
+      try {
+        for (const [, entry] of Object.entries(rawIndex)) {
+          if (!entry || typeof entry !== 'object') continue;
+          for (const [k, v] of Object.entries(entry)) {
+            if (['tag','tags','image','date','excerpt','thumb','cover'].includes(k)) continue;
+            if (k === 'location' && typeof v === 'string') { baseAllowed.add(String(v)); continue; }
+            if (v && typeof v === 'object' && typeof v.location === 'string') baseAllowed.add(String(v.location));
+            else if (typeof v === 'string') baseAllowed.add(String(v));
+          }
+        }
+      } catch (_) {}
+    }
+    allowedLocations = baseAllowed;
+    postsByLocationTitle = {};
+    for (const [title, meta] of Object.entries(posts)) {
+      if (meta && meta.location) postsByLocationTitle[meta.location] = title;
+    }
+    postsIndexCache = posts;
+    locationAliasMap = new Map();
     try {
-      const r = await fetch('wwwroot/index.json');
-      if (!r.ok) return null;
-      return await r.json();
-    } catch (_) { return null; }
-  })()
-])
+      if (rawIndex && typeof rawIndex === 'object' && !Array.isArray(rawIndex)) {
+        const cur = (getCurrentLang && getCurrentLang()) || 'en';
+        const curNorm = normalizeLangKey(cur);
+        for (const [, entry] of Object.entries(rawIndex)) {
+          if (!entry || typeof entry !== 'object') continue;
+          const reserved = new Set(['tag','tags','image','date','excerpt','thumb','cover']);
+          const variants = [];
+          for (const [k, v] of Object.entries(entry)) {
+            if (reserved.has(k)) continue;
+            const nk = normalizeLangKey(k);
+            if (k === 'location' && typeof v === 'string') {
+              variants.push({ lang: 'default', location: String(v) });
+            } else if (typeof v === 'string') {
+              variants.push({ lang: nk, location: String(v) });
+            } else if (v && typeof v === 'object' && typeof v.location === 'string') {
+              variants.push({ lang: nk, location: String(v.location) });
+            }
+          }
+          if (!variants.length) continue;
+          const findBy = (langs) => variants.find(x => langs.includes(x.lang));
+          let chosen = findBy([curNorm]) || findBy(['en']) || findBy(['default']) || variants[0];
+          if (!chosen) chosen = variants[0];
+          variants.forEach(v => { if (v.location && chosen.location) locationAliasMap.set(v.location, chosen.location); });
+        }
+      }
+    } catch (_) {}
+    try { refreshLanguageSelector(); } catch (_) {}
+    // Rebuild the Tools panel so all labels reflect the new language
+    try {
+      const tools = document.getElementById('tools');
+      if (tools && tools.parentElement) tools.parentElement.removeChild(tools);
+      // Recreate and rebind controls
+      mountThemeControls();
+      applySavedTheme();
+      bindThemeToggle();
+      bindSeoGenerator();
+      bindThemePackPicker();
+      refreshLanguageSelector();
+    } catch (_) {}
+    try {
+      renderSiteIdentity(siteConfig);
+      const cfgTitle = (function pick(val){
+        if (!val) return '';
+        if (typeof val === 'string') return val;
+        const lang = getCurrentLang && getCurrentLang();
+        const v = (lang && val[lang]) || val.default || '';
+        return typeof v === 'string' ? v : '';
+      })(siteConfig && siteConfig.siteTitle);
+      if (cfgTitle) setBaseSiteTitle(cfgTitle);
+    } catch (_) {}
+    try { renderSiteLinks(siteConfig); } catch (_) {}
+    try {
+      const lang = getCurrentLang && getCurrentLang();
+      const getLocalizedValue = (val) => {
+        if (!val) return '';
+        if (typeof val === 'string') return val;
+        return (lang && val[lang]) || val.default || '';
+      };
+      updateSEO({
+        title: getLocalizedValue(siteConfig.siteTitle) || 'NanoSite - Zero-Dependency Static Blog',
+        description: getLocalizedValue(siteConfig.siteDescription) || 'A pure front-end template for simple blogs and docs. No compilation needed - just edit Markdown files and deploy.',
+        type: 'website', url: window.location.href
+      }, siteConfig);
+    } catch (_) {}
+    routeAndRender();
+  } catch (_) {
+    try { window.location.reload(); } catch (__) {}
+  }
+}
+// Expose as a global so the UI can call it
+try { window.__ns_softResetLang = () => softResetToSiteDefaultLanguage(); } catch (_) {}
+
+// Load site config first so we can honor defaultLanguage before fetching localized content
+loadSiteConfig()
+  .then(cfg => {
+    siteConfig = cfg || {};
+    // Apply site-configured defaults early
+    try {
+      // 1) Page size (pagination)
+      const cfgPageSize = (siteConfig && (siteConfig.pageSize || siteConfig.postsPerPage));
+      if (cfgPageSize != null) {
+        const n = parseInt(cfgPageSize, 10);
+        if (!isNaN(n) && n > 0) PAGE_SIZE = n;
+      }
+      // 2) Default language: honor only when user hasn't chosen via URL/localStorage
+      const cfgDefaultLang = (siteConfig && (siteConfig.defaultLanguage || siteConfig.defaultLang));
+      if (cfgDefaultLang) {
+        let hasUrlLang = false;
+        try { const u = new URL(window.location.href); hasUrlLang = !!u.searchParams.get('lang'); } catch (_) {}
+        let savedLang = '';
+        try { savedLang = String(localStorage.getItem('lang') || ''); } catch (_) {}
+        const hasSaved = !!savedLang;
+        const htmlDefault = String(defaultLang || 'en').toLowerCase();
+        const savedIsHtmlDefault = savedLang && savedLang.toLowerCase() === htmlDefault;
+        if (!hasUrlLang && (!hasSaved || savedIsHtmlDefault)) {
+          // Force language to site default, not just the fallback
+          initI18n({ lang: String(cfgDefaultLang) });
+          try { const input = document.getElementById('searchInput'); if (input) input.setAttribute('placeholder', t('sidebar.searchPlaceholder')); } catch (_) {}
+        }
+      }
+    } catch (_) { /* ignore site default application errors */ }
+
+    // Now fetch localized content and tabs for the (possibly updated) language
+    return Promise.allSettled([
+      loadContentJson('wwwroot', 'index'),
+      loadTabsJson('wwwroot', 'tabs'),
+      (async () => {
+        try {
+          const obj = await fetchConfigWithYamlFallback(['wwwroot/index.yaml','wwwroot/index.yml']);
+          return (obj && typeof obj === 'object') ? obj : null;
+        } catch (_) { return null; }
+      })()
+    ]);
+  })
   .then(results => {
     const posts = results[0].status === 'fulfilled' ? (results[0].value || {}) : {};
     const tabs = results[1].status === 'fulfilled' ? (results[1].value || {}) : {};
-    siteConfig = results[2] && results[2].status === 'fulfilled' ? (results[2].value || {}) : {};
-    const rawIndex = results[3] && results[3].status === 'fulfilled' ? (results[3].value || null) : null;
+    const rawIndex = results[2] && results[2].status === 'fulfilled' ? (results[2].value || null) : null;
     tabsBySlug = {};
     stableToCurrentTabSlug = {};
     for (const [title, cfg] of Object.entries(tabs)) {
@@ -1912,7 +2015,7 @@ Promise.allSettled([
     }
     // Build a whitelist of allowed post file paths. Start with the current-language
     // transformed entries, then include any language-variant locations discovered
-    // from the raw unified index.json (if present).
+    // from the raw unified index.yaml (if present).
     const baseAllowed = new Set(Object.values(posts).map(v => String(v.location)));
     if (rawIndex && typeof rawIndex === 'object' && !Array.isArray(rawIndex)) {
       try {
@@ -2002,7 +2105,8 @@ Promise.allSettled([
       };
       initErrorReporter({
         reportUrl: siteConfig && siteConfig.reportIssueURL,
-        siteTitle: pick(siteConfig && siteConfig.siteTitle) || 'NanoSite'
+        siteTitle: pick(siteConfig && siteConfig.siteTitle) || 'NanoSite',
+        enableOverlay: !!(siteConfig && siteConfig.errorOverlay === true)
       });
     } catch (_) {}
     
@@ -2030,9 +2134,15 @@ Promise.allSettled([
     
   routeAndRender();
   })
-  .catch(() => {
+  .catch((e) => {
     document.getElementById('tocview').innerHTML = '';
     document.getElementById('mainview').innerHTML = `<div class=\"notice error\"><h3>${t('ui.indexUnavailable')}</h3><p>${t('errors.indexUnavailableBody')}</p></div>`;
+    // Surface an overlay for boot/index failures (network/unified JSON issues)
+    try {
+      const err = new Error((t('errors.indexUnavailableBody') || 'Could not load the post index.'));
+      try { err.name = 'Warning'; } catch(_) {}
+      showErrorOverlay(err, { message: err.message, origin: 'boot.indexUnavailable', error: (e && e.message) || String(e || '') });
+    } catch (_) {}
   });
 
 // Footer: set dynamic year once

@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=../assets/schema/tabs.json
+
+gallery:
+  en:
+    title: Gallery
+    location: tab/gallery.md
+
+publications:
+  en:
+    title: Publications
+    location: tab/publications.md
+
+About:
+  en:
+    title: About
+    location: tab/about/en.md
+  zh:
+    title: 关于
+    location: tab/about/zh.md

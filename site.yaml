@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=./assets/schema/site.json
+
+# Site identity configurations
+siteTitle:
+  default: "deemoe's journal"
+  zh: "deemoe 的日志"
+  ja: "deemoe のジャーナル"
+siteSubtitle:
+  default: "Thanks for playing my game."
+  zh: "眼见何事，情系何处，身在何方，心思何人"
+avatar: assets/avatar.jpeg
+
+# Social media links
+profileLinks:
+  - label: GitHub
+    href: https://github.com/deemoe404
+  - label: ORCID
+    href: https://orcid.org/0009-0005-4213-5418
+  - label: E-Mail
+    href: mailto:deemoe404@gmail.com
+
+# SEO optimization configurations
+resourceURL: https://dee.moe/wwwroot/
+siteDescription:
+  default: "deemoe's journal"
+siteKeywords:
+  default: static blog, markdown, github pages, blog
+
+# Miscellaneous configurations
+contentOutdatedDays: 180  # Days before content is considered outdated
+cardCoverFallback: false  # Use a generated fallback cover image if none provided
+errorOverlay: true        # Show error overlay on the page if an error occurs
+pageSize: 8               # Number of posts per page on the index list
+defaultLanguage: en       # Default UI/content language (e.g., en, zh, ja)
+
+# Theme override configurations
+themeMode: user
+themePack: minimalism
+themeOverride: true
+
+# Asset warnings configurations
+assetWarnings:
+  largeImage:
+    enabled: true
+    thresholdKB: 500

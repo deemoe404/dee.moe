@@ -9,6 +9,7 @@
 // - To show a friendly name in the language dropdown, add an entry to `languageNames`.
 
 import { parseFrontMatter } from './content.js';
+import { getContentRoot } from './utils.js';
 import { fetchConfigWithYamlFallback } from './yaml.js';
 
 // Default language fallback when no user/browser preference is available.
@@ -37,6 +38,9 @@ const translations = {
       close: 'Close',
       copyLink: 'Copy link',
       linkCopied: 'Link copied',
+      versionLabel: 'Version',
+      versionsCount: (n) => `${n} versions`,
+      latestSuffix: '(latest)',
       outdatedWarning: 'Caution: This blog post may contain outdated information as it has been published a long time ago.',
       notFound: 'Not Found',
       pageUnavailable: 'Page Unavailable',
@@ -53,7 +57,9 @@ const translations = {
       copyDetails: 'Copy details',
       reportIssue: 'Report issue',
       warning: 'Warning',
-      error: 'Error'
+      error: 'Error',
+      aiFlagLabel: 'AI-assisted',
+      aiFlagTooltip: 'AI-assisted: generated or edited with an LLM'
     },
     code: {
       copy: 'Copy',
@@ -105,6 +111,9 @@ const translations = {
       close: '关闭',
       copyLink: '复制链接',
       linkCopied: '已复制链接',
+      versionLabel: '版本',
+      versionsCount: (n) => `${n} 个版本`,
+      latestSuffix: '（最新）',
       outdatedWarning: '提示：这篇文章发布已久，内容可能已过时。',
       notFound: '未找到',
       pageUnavailable: '页面不可用',
@@ -121,7 +130,9 @@ const translations = {
       copyDetails: '复制详情',
       reportIssue: '报告问题',
       warning: '警告',
-      error: '错误'
+      error: '错误',
+      aiFlagLabel: 'AI 参与',
+      aiFlagTooltip: 'AI 参与：本文由生成式 LLM 生成或修改'
     },
     code: {
       copy: '复制',
@@ -173,6 +184,9 @@ const translations = {
       close: '閉じる',
       copyLink: 'リンクをコピー',
       linkCopied: 'リンクをコピーしました',
+      versionLabel: 'バージョン',
+      versionsCount: (n) => `${n} 個のバージョン`,
+      latestSuffix: '（最新）',
       outdatedWarning: '注意：公開から時間が経っているため、内容が古くなっている可能性があります。',
       notFound: '見つかりません',
       pageUnavailable: 'ページを表示できません',
@@ -189,7 +203,9 @@ const translations = {
       copyDetails: '詳細をコピー',
       reportIssue: '問題を報告',
       warning: '警告',
-      error: 'エラー'
+      error: 'エラー',
+      aiFlagLabel: 'AI 参加',
+      aiFlagTooltip: 'AI 参加：本記事は生成系LLMで生成・編集されています'
     },
     code: {
       copy: 'コピー',
@@ -364,10 +380,16 @@ function transformUnifiedContent(obj, lang) {
 }
 
 // Load content metadata from simplified JSON and Markdown front matter
+// Supports per-language single path (string) OR multiple versions (array of strings)
 async function loadContentFromFrontMatter(obj, lang) {
   const out = {};
   const langsSeen = new Set();
   const nlang = normalizeLangKey(lang);
+  const truthy = (v) => {
+    if (v === true) return true;
+    const s = String(v ?? '').trim().toLowerCase();
+    return s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === 'on' || s === 'enabled';
+  };
   
   // Collect all available languages from the simplified JSON
   for (const [key, val] of Object.entries(obj || {})) {
@@ -383,54 +405,74 @@ async function loadContentFromFrontMatter(obj, lang) {
   for (const [key, val] of Object.entries(obj || {})) {
     if (!val || typeof val !== 'object' || Array.isArray(val)) continue;
     
-    // Find the best path for the current language
-    let chosenPath = val[nlang] || val[baseDefaultLang] || val['en'] || val['default'];
-    
-    // Fallback to first available path
-    if (!chosenPath) {
-      const paths = Object.values(val).filter(p => typeof p === 'string');
-      if (paths.length > 0) chosenPath = paths[0];
+    // Resolve the best language bucket first
+    let chosenBucketKey = null;
+    if (val[nlang] != null) chosenBucketKey = nlang;
+    else if (val[baseDefaultLang] != null) chosenBucketKey = baseDefaultLang;
+    else if (val['en'] != null) chosenBucketKey = 'en';
+    else if (val['default'] != null) chosenBucketKey = 'default';
+    // Fallback to first available key when none matched
+    if (!chosenBucketKey) {
+      const firstKey = Object.keys(val)[0];
+      if (firstKey) chosenBucketKey = firstKey;
     }
-    
-    if (!chosenPath) continue;
-    
-    try {
-      // Load the markdown file and extract front matter
-      const response = await fetch(`wwwroot/${chosenPath}`);
-      if (!response.ok) continue;
-      
-      const content = await response.text();
-      const { frontMatter } = parseFrontMatter(content);
-      
-      // Build metadata object
-      // Resolve relative image path (e.g., "cover.jpg") against the markdown's folder
-      const resolveImagePath = (img) => {
-        const s = String(img || '').trim();
-        if (!s) return undefined;
-        // Absolute or protocol URLs stay as-is
-        if (/^(https?:|data:)/i.test(s) || s.startsWith('/')) return s;
-        // Resolve relative to the markdown location (without wwwroot/ prefix)
-        const lastSlash = chosenPath.lastIndexOf('/');
-        const baseDir = lastSlash >= 0 ? chosenPath.slice(0, lastSlash + 1) : '';
-        return (baseDir + s).replace(/\/+/g, '/');
-      };
+    if (!chosenBucketKey) continue;
 
-      const meta = {
-        location: chosenPath,
-        image: resolveImagePath(frontMatter.image) || undefined,
-        tag: frontMatter.tags || frontMatter.tag || undefined,
-        date: frontMatter.date || undefined,
-        excerpt: frontMatter.excerpt || undefined
-      };
-      
-      // Use title from front matter or fallback to key
-      const title = frontMatter.title || key;
-      out[title] = meta;
-    } catch (error) {
-      console.warn(`Failed to load content from ${chosenPath}:`, error);
-      // Fallback to basic metadata
-      out[key] = { location: chosenPath };
+    const raw = val[chosenBucketKey];
+    // Normalize to an array of paths (versions)
+    const paths = Array.isArray(raw) ? raw.filter(x => typeof x === 'string') : (typeof raw === 'string' ? [raw] : []);
+    if (!paths.length) continue;
+
+    const variants = [];
+    for (const p of paths) {
+      try {
+        const response = await fetch(`${getContentRoot()}/${p}`);
+        if (!response || !response.ok) { continue; }
+        const content = await response.text();
+        const { frontMatter } = parseFrontMatter(content);
+
+        // Resolve relative image (e.g., 'cover.jpg') against this markdown's folder
+        const resolveImagePath = (img) => {
+          const s = String(img || '').trim();
+          if (!s) return undefined;
+          if (/^(https?:|data:)/i.test(s) || s.startsWith('/')) return s;
+          const lastSlash = p.lastIndexOf('/');
+          const baseDir = lastSlash >= 0 ? p.slice(0, lastSlash + 1) : '';
+          return (baseDir + s).replace(/\/+/g, '/');
+        };
+
+        variants.push({
+          location: p,
+          image: resolveImagePath(frontMatter.image) || undefined,
+          tag: frontMatter.tags || frontMatter.tag || undefined,
+          date: frontMatter.date || undefined,
+          excerpt: frontMatter.excerpt || undefined,
+          versionLabel: frontMatter.version || undefined,
+          ai: truthy(frontMatter.ai || frontMatter.aiGenerated || frontMatter.llm) || undefined,
+          __title: frontMatter.title || undefined
+        });
+      } catch (error) {
+        console.warn(`Failed to load content from ${p}:`, error);
+        variants.push({ location: p });
+      }
     }
+
+    // Choose the latest by date as the primary version
+    const toTime = (d) => { const t = new Date(String(d || '')).getTime(); return Number.isFinite(t) ? t : -Infinity; };
+    variants.sort((a, b) => toTime(b.date) - toTime(a.date));
+    const primary = variants[0];
+    if (!primary) continue;
+
+    // The displayed title prefers the primary's title
+    const title = (primary.__title) || key;
+    const { __title, versionLabel, ...restPrimary } = primary;
+    const meta = { ...restPrimary, versionLabel };
+    // Attach versions list for UI switching (omit internal title field)
+    meta.versions = variants.map(v => {
+      const { __title: _t, ...rest } = v;
+      return rest;
+    });
+    out[title] = meta;
   }
   
   return { entries: out, availableLangs: Array.from(langsSeen).sort() };
@@ -457,7 +499,12 @@ export async function loadContentJson(basePath, baseName) {
         if (v && typeof v === 'object' && !Array.isArray(v)) {
           // Check for simplified format (language -> path mapping)
           const innerKeys = Object.keys(v);
-          const hasOnlyPaths = innerKeys.every(ik => typeof v[ik] === 'string');
+          const hasOnlyPaths = innerKeys.every(ik => {
+            const val = v[ik];
+            if (typeof val === 'string') return true;
+            if (Array.isArray(val)) return val.every(item => typeof item === 'string');
+            return false;
+          });
           
           if (hasOnlyPaths) {
             isSimplified = true;

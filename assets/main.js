@@ -3,14 +3,14 @@ import { setupAnchors, setupTOC } from './js/toc.js';
 import { applySavedTheme, bindThemeToggle, bindSeoGenerator, bindThemePackPicker, mountThemeControls, refreshLanguageSelector, applyThemeConfig } from './js/theme.js';
 import { setupSearch } from './js/search.js';
 import { extractExcerpt, computeReadTime } from './js/content.js';
-import { getQueryVariable, setDocTitle, setBaseSiteTitle, cardImageSrc, fallbackCover, renderTags, slugifyTab, escapeHtml, formatDisplayDate, formatBytes, renderSkeletonArticle, isModifiedClick } from './js/utils.js';
+import { getQueryVariable, setDocTitle, setBaseSiteTitle, cardImageSrc, fallbackCover, renderTags, slugifyTab, escapeHtml, formatDisplayDate, formatBytes, renderSkeletonArticle, isModifiedClick, getContentRoot } from './js/utils.js';
 import { initI18n, t, withLangParam, loadLangJson, loadContentJson, loadTabsJson, getCurrentLang, normalizeLangKey } from './js/i18n.js';
 import { updateSEO, extractSEOFromMarkdown } from './js/seo.js';
 import { initErrorReporter, setReporterContext, showErrorOverlay } from './js/errors.js';
 import { initSyntaxHighlighting } from './js/syntax-highlight.js';
 import { fetchConfigWithYamlFallback } from './js/yaml.js';
 import { applyMasonry, updateMasonryItem, calcAndSetSpan, toPx, debounce } from './js/masonry.js';
-import { aggregateTags, renderTagSidebar, setupTagTooltips } from './js/tags.js';
+import { aggregateTags, renderTagSidebar, setupTagTooltips, attachHoverTooltip } from './js/tags.js';
 import { installLightbox } from './js/lightbox.js';
 import { renderPostNav } from './js/post-nav.js';
 import { prefersReducedMotion, getArticleTitleFromMain } from './js/dom-utils.js';
@@ -29,6 +29,10 @@ let allowedLocations = new Set();
 let locationAliasMap = new Map();
 // Default page size; can be overridden by site.yaml (pageSize/postsPerPage)
 let PAGE_SIZE = 8;
+// Guard against overlapping post loads (rapid version switches/back-forward)
+let __activePostRequestId = 0;
+// Track last route to harmonize scroll behavior on back/forward
+let __lastRouteKey = '';
 
 // --- UI helpers: smooth show/hide (height + opacity) ---
 
@@ -158,6 +162,38 @@ function smoothHide(el, onDone) {
   // Fallback in case transitionend is missed on some properties
   setTimeout(finalize, Math.max(HEIGHT_MS, MARGIN_MS, PADDING_MS) + BUFFER_MS);
 }
+
+// Global delegate for version selector changes to survive re-renders
+try {
+  if (!window.__ns_version_select_bound) {
+    window.__ns_version_select_bound = true;
+    const handler = (e) => {
+      try {
+        const el = e && e.target;
+        if (!el || !el.classList || !el.classList.contains('post-version-select')) return;
+        const loc = String(el.value || '').trim();
+        if (!loc) return;
+        const url = new URL(window.location.href);
+        url.searchParams.set('id', loc);
+        const lang = (getCurrentLang && getCurrentLang()) || 'en';
+        url.searchParams.set('lang', lang);
+        // Use SPA navigation so back/forward keeps the selector in sync
+        try {
+          history.pushState({}, '', url.toString());
+          // Dispatch a popstate event so the unified handler routes and renders once
+          try { window.dispatchEvent(new PopStateEvent('popstate')); } catch (_) { /* older browsers may not support constructor */ }
+          // Scroll to top for a consistent version switch experience
+          try { window.scrollTo(0, 0); } catch (_) {}
+        } catch (_) {
+          // Fallback to full navigation if History API fails
+          window.location.assign(url.toString());
+        }
+      } catch (_) {}
+    };
+    document.addEventListener('change', handler, true);
+    document.addEventListener('input', handler, true);
+  }
+} catch (_) {}
 
 // Ensure element height fully resets to its natural auto height
 function ensureAutoHeight(el) {
@@ -730,7 +766,7 @@ function hydrateInternalLinkCards(container) {
 
       // Fetch markdown to compute excerpt + read time
       const ensureMd = (l) => {
-        if (!mdCache.has(l)) mdCache.set(l, getFile('wwwroot/' + l).catch(() => ''));
+        if (!mdCache.has(l)) mdCache.set(l, getFile(`${getContentRoot()}/${l}`).catch(() => ''));
         return mdCache.get(l);
       };
       ensureMd(loc).then(md => {
@@ -1133,6 +1169,8 @@ function setupResponsiveTabsObserver() {
 }
 
 function displayPost(postname) {
+  // Bump request token to invalidate any in-flight older renders
+  const reqId = (++__activePostRequestId);
   // Add loading-state classes to keep layout stable
   const contentEl = document.querySelector('.content');
   const sidebarEl = document.querySelector('.sidebar');
@@ -1159,18 +1197,29 @@ function displayPost(postname) {
   const main = document.getElementById('mainview');
   if (main) main.innerHTML = renderSkeletonArticle();
 
-  return getFile('wwwroot/' + postname).then(markdown => {
+  return getFile(`${getContentRoot()}/${postname}`).then(markdown => {
+    // Ignore stale responses if a newer navigation started
+    if (reqId !== __activePostRequestId) return;
     // Remove loading-state classes
     if (contentEl) contentEl.classList.remove('loading');
     if (sidebarEl) sidebarEl.classList.remove('loading');
     
     const dir = (postname.lastIndexOf('/') >= 0) ? postname.slice(0, postname.lastIndexOf('/') + 1) : '';
-    const baseDir = `wwwroot/${dir}`;
+    const baseDir = `${getContentRoot()}/${dir}`;
   const output = mdParse(markdown, baseDir);
   // Compute fallback title using index cache before rendering
   const fallback = postsByLocationTitle[postname] || postname;
-  // Try to get metadata for this post from index cache
-  const postMetadata = (Object.entries(postsIndexCache || {}) || []).find(([, v]) => v && v.location === postname)?.[1] || {};
+  // Try to get metadata for this post from index cache. Support versioned entries.
+  let postEntry = (Object.entries(postsIndexCache || {}) || []).find(([, v]) => v && v.location === postname);
+  let postMetadata = postEntry ? postEntry[1] : {};
+  if (!postEntry) {
+    const found = (Object.entries(postsIndexCache || {}) || []).find(([, v]) => Array.isArray(v && v.versions) && v.versions.some(ver => ver && ver.location === postname));
+    if (found) {
+      const baseMeta = found[1];
+      const match = (baseMeta.versions || []).find(ver => ver.location === postname) || {};
+      postMetadata = { ...match, versions: baseMeta.versions || [] };
+    }
+  }
   // Tentatively render meta card with fallback title first; we'll update title after reading h1
   const preTitle = fallback;
   const outdatedCardHtml = renderOutdatedCard(postMetadata, siteConfig);
@@ -1213,12 +1262,30 @@ function displayPost(postname) {
       });
     }
   } catch (_) {}
+  // Attach a floating tooltip to the AI flag (consistent with tag tooltips)
+  try {
+    const aiFlag = document.querySelector('#mainview .post-meta-card .ai-flag');
+    if (aiFlag) attachHoverTooltip(aiFlag, () => t('ui.aiFlagTooltip'), { delay: 0 });
+  } catch (_) {}
   // Always use the localized title from index.yaml for display/meta/tab labels
   const articleTitle = fallback;
     // If title changed after parsing, update the card's title text
     try {
       const titleEl = document.querySelector('#mainview .post-meta-card .post-meta-title');
-      if (titleEl) titleEl.textContent = articleTitle;
+      if (titleEl) {
+        const ai = titleEl.querySelector('.ai-flag');
+        const prefix = ai ? ai.outerHTML : '';
+        titleEl.innerHTML = `${prefix}${escapeHtml(articleTitle)}`;
+        // Re-bind tooltip to fresh ai flag node after innerHTML swap
+        try {
+          const newAi = titleEl.querySelector('.ai-flag');
+          if (newAi) {
+            // Avoid native title tooltip overlap
+            newAi.removeAttribute('title');
+            attachHoverTooltip(newAi, () => t('ui.aiFlagTooltip'), { delay: 0 });
+          }
+        } catch (_) {}
+      }
     } catch (_) {}
     
     // Update SEO meta tags for the post
@@ -1248,15 +1315,25 @@ function displayPost(postname) {
     try { setupTOC(); } catch (_) {}
     try { initSyntaxHighlighting(); } catch (_) {}
   try { renderTagSidebar(postsIndexCache); } catch (_) {}
-    // If URL contains a hash, ensure we jump after content is in DOM
+    // If URL contains a hash, try to jump to it; if missing in this version, clear hash and scroll to top
     const currentHash = (location.hash || '').replace(/^#/, '');
     if (currentHash) {
       const target = document.getElementById(currentHash);
       if (target) {
         requestAnimationFrame(() => { target.scrollIntoView({ block: 'start' }); });
+      } else {
+        // Remove stale anchor to avoid unexpected jumps on future navigations
+        try {
+          const url = new URL(window.location.href);
+          url.hash = '';
+          history.replaceState({}, '', url.toString());
+        } catch (_) {}
+        try { window.scrollTo(0, 0); } catch (_) {}
       }
     }
   }).catch(() => {
+    // Ignore stale errors if a newer navigation started
+    if (reqId !== __activePostRequestId) return;
     // Remove loading-state classes even on error
     if (contentEl) contentEl.classList.remove('loading');
     if (sidebarEl) sidebarEl.classList.remove('loading');
@@ -1268,8 +1345,8 @@ function displayPost(postname) {
       showErrorOverlay(err, {
         message: err.message,
         origin: 'view.post.notfound',
-        filename: 'wwwroot/' + postname,
-        assetUrl: 'wwwroot/' + postname,
+        filename: `${getContentRoot()}/${postname}`,
+        assetUrl: `${getContentRoot()}/${postname}`,
         id: postname
       });
     } catch (_) {}
@@ -1316,7 +1393,10 @@ function displayIndex(parsed) {
     // pre-render meta line with date if available; read time appended after fetch
     const hasDate = value && value.date;
     const dateHtml = hasDate ? `<span class=\"card-date\">${escapeHtml(formatDisplayDate(value.date))}</span>` : '';
-    html += `<a href=\"${withLangParam(`?id=${encodeURIComponent(value['location'])}`)}\" data-idx=\"${encodeURIComponent(key)}\">${cover}<div class=\"card-title\">${key}</div><div class=\"card-excerpt\"></div><div class=\"card-meta\">${dateHtml}</div>${tag}</a>`;
+    const verCount = (value && Array.isArray(value.versions)) ? value.versions.length : 0;
+    const versionsHtml = verCount > 1 ? `<span class=\"card-versions\" title=\"${t('ui.versionLabel')}\">${t('ui.versionsCount', verCount)}</span>` : '';
+    const metaInner = dateHtml + (dateHtml && versionsHtml ? `<span class=\"card-sep\">•</span>` : '') + (versionsHtml || '');
+    html += `<a href=\"${withLangParam(`?id=${encodeURIComponent(value['location'])}`)}\" data-idx=\"${encodeURIComponent(key)}\">${cover}<div class=\"card-title\">${key}</div><div class=\"card-excerpt\"></div><div class=\"card-meta\">${metaInner}</div>${tag}</a>`;
   }
   html += '</div>';
   // Pagination controls
@@ -1364,7 +1444,7 @@ function displayIndex(parsed) {
     if (exEl && meta && meta.excerpt) {
       try { exEl.textContent = String(meta.excerpt); } catch (_) {}
     }
-    getFile('wwwroot/' + loc).then(md => {
+    getFile(`${getContentRoot()}/${loc}`).then(md => {
       const ex = extractExcerpt(md, 50);
       // Only set excerpt from markdown if no explicit excerpt in metadata
       if (exEl && !(meta && meta.excerpt)) exEl.textContent = ex;
@@ -1374,12 +1454,13 @@ function displayIndex(parsed) {
       if (metaEl) {
         const dateEl = metaEl.querySelector('.card-date');
         const readHtml = `<span class=\"card-read\">${minutes} ${t('ui.minRead')}</span>`;
-        if (dateEl && dateEl.textContent.trim()) {
-          // add a separator dot if date exists
-          metaEl.innerHTML = `${dateEl.outerHTML}<span class=\"card-sep\">•</span>${readHtml}`;
-        } else {
-          metaEl.innerHTML = readHtml;
-        }
+        const verCount = (meta && Array.isArray(meta.versions)) ? meta.versions.length : 0;
+        const versionsHtml = verCount > 1 ? `<span class=\"card-versions\" title=\"${t('ui.versionLabel')}\">${t('ui.versionsCount', verCount)}</span>` : '';
+        const parts = [];
+        if (dateEl && dateEl.textContent.trim()) parts.push(dateEl.outerHTML);
+        parts.push(readHtml);
+        if (versionsHtml) parts.push(versionsHtml);
+        metaEl.innerHTML = parts.join('<span class=\"card-sep\">•</span>');
       }
   // Recompute masonry span for the updated card
   const container = document.querySelector('.index');
@@ -1439,7 +1520,10 @@ function displaySearch(query) {
       : (useFallbackCover ? fallbackCover(key) : '');
     const hasDate = value && value.date;
     const dateHtml = hasDate ? `<span class=\"card-date\">${escapeHtml(formatDisplayDate(value.date))}</span>` : '';
-    html += `<a href=\"${withLangParam(`?id=${encodeURIComponent(value['location'])}`)}\" data-idx=\"${encodeURIComponent(key)}\">${cover}<div class=\"card-title\">${key}</div><div class=\"card-excerpt\"></div><div class=\"card-meta\">${dateHtml}</div>${tag}</a>`;
+    const verCount = (value && Array.isArray(value.versions)) ? value.versions.length : 0;
+    const versionsHtml = verCount > 1 ? `<span class=\"card-versions\" title=\"${t('ui.versionLabel')}\">${t('ui.versionsCount', verCount)}</span>` : '';
+    const metaInner = dateHtml + (dateHtml && versionsHtml ? `<span class=\"card-sep\">•</span>` : '') + (versionsHtml || '');
+    html += `<a href=\"${withLangParam(`?id=${encodeURIComponent(value['location'])}`)}\" data-idx=\"${encodeURIComponent(key)}\">${cover}<div class=\"card-title\">${key}</div><div class=\"card-excerpt\"></div><div class=\"card-meta\">${metaInner}</div>${tag}</a>`;
   }
   html += '</div>';
 
@@ -1492,7 +1576,7 @@ function displaySearch(query) {
     if (exEl && meta && meta.excerpt) {
       try { exEl.textContent = String(meta.excerpt); } catch (_) {}
     }
-    getFile('wwwroot/' + loc).then(md => {
+    getFile(`${getContentRoot()}/${loc}`).then(md => {
       const ex = extractExcerpt(md, 50);
       // Only set excerpt from markdown if no explicit excerpt in metadata
       if (exEl && !(meta && meta.excerpt)) exEl.textContent = ex;
@@ -1501,11 +1585,13 @@ function displaySearch(query) {
       if (metaEl) {
         const dateEl = metaEl.querySelector('.card-date');
         const readHtml = `<span class=\"card-read\">${minutes} ${t('ui.minRead')}</span>`;
-        if (dateEl && dateEl.textContent.trim()) {
-          metaEl.innerHTML = `${dateEl.outerHTML}<span class=\"card-sep\">•</span>${readHtml}`;
-        } else {
-          metaEl.innerHTML = readHtml;
-        }
+        const verCount = (meta && Array.isArray(meta.versions)) ? meta.versions.length : 0;
+        const versionsHtml = verCount > 1 ? `<span class=\"card-versions\" title=\"${t('ui.versionLabel')}\">${t('ui.versionsCount', verCount)}</span>` : '';
+        const parts = [];
+        if (dateEl && dateEl.textContent.trim()) parts.push(dateEl.outerHTML);
+        parts.push(readHtml);
+        if (versionsHtml) parts.push(versionsHtml);
+        metaEl.innerHTML = parts.join('<span class=\"card-sep\">•</span>');
       }
   const container = document.querySelector('.index');
   if (container && el) updateMasonryItem(container, el);
@@ -1549,14 +1635,14 @@ function displayStaticTab(slug) {
   const tagBox = document.getElementById('tagview');
   if (tagBox) smoothHide(tagBox);
   renderTabs(slug);
-  getFile('wwwroot/' + tab.location)
+  getFile(`${getContentRoot()}/${tab.location}`)
     .then(md => {
       // 移除加载状态类
       if (contentEl) contentEl.classList.remove('loading');
       if (sidebarEl) sidebarEl.classList.remove('loading');
       
       const dir = (tab.location.lastIndexOf('/') >= 0) ? tab.location.slice(0, tab.location.lastIndexOf('/') + 1) : '';
-      const baseDir = `wwwroot/${dir}`;
+      const baseDir = `${getContentRoot()}/${dir}`;
       const output = mdParse(md, baseDir);
   const mv = document.getElementById('mainview');
   if (mv) mv.innerHTML = output.post;
@@ -1594,7 +1680,7 @@ function displayStaticTab(slug) {
       
       // Surface an overlay for missing static tab page
       try {
-        const url = 'wwwroot/' + tab.location;
+        const url = `${getContentRoot()}/${tab.location}`;
         const msg = (t('errors.pageUnavailableBody') || 'Could not load this tab.') + (e && e.message ? ` (${e.message})` : '');
         const err = new Error(msg);
         try { err.name = 'Warning'; } catch(_) {}
@@ -1609,6 +1695,7 @@ function displayStaticTab(slug) {
 // Simple router: render based on current URL
 function routeAndRender() {
   const rawId = getQueryVariable('id');
+  // Always apply cross-language aliasing when available so switching language rewrites to the correct variant
   const id = (rawId && locationAliasMap.has(rawId)) ? locationAliasMap.get(rawId) : rawId;
   // Reflect remapped ID in the URL without triggering navigation
   try {
@@ -1784,8 +1871,19 @@ document.addEventListener('click', (e) => {
 });
 
 window.addEventListener('popstate', () => {
+  const prevKey = __lastRouteKey || '';
   routeAndRender();
   try { renderTagSidebar(postsIndexCache); } catch (_) {}
+  // Normalize scroll behavior: if navigating between different post IDs, scroll to top
+  try {
+    const id = getQueryVariable('id');
+    const tab = (getQueryVariable('tab') || 'posts').toLowerCase();
+    const curKey = id ? `post:${id}` : `tab:${tab}`;
+    if (prevKey && prevKey.startsWith('post:') && curKey.startsWith('post:') && prevKey !== curKey) {
+      try { window.scrollTo(0, 0); } catch (_) {}
+    }
+    __lastRouteKey = curKey;
+  } catch (_) {}
 });
 
 // Update sliding indicator on window resize
@@ -1839,9 +1937,9 @@ async function softResetToSiteDefaultLanguage() {
   // Reload localized content and tabs for the new language, then rerender
   try {
     const results = await Promise.allSettled([
-      loadContentJson('wwwroot', 'index'),
-      loadTabsJson('wwwroot', 'tabs'),
-      (async () => { try { const obj = await fetchConfigWithYamlFallback(['wwwroot/index.yaml','wwwroot/index.yml']); return (obj && typeof obj === 'object') ? obj : null; } catch (_) { return null; } })()
+      loadContentJson(getContentRoot(), 'index'),
+      loadTabsJson(getContentRoot(), 'tabs'),
+      (async () => { try { const cr = getContentRoot(); const obj = await fetchConfigWithYamlFallback([`${cr}/index.yaml`,`${cr}/index.yml`]); return (obj && typeof obj === 'object') ? obj : null; } catch (_) { return null; } })()
     ]);
     const posts = results[0].status === 'fulfilled' ? (results[0].value || {}) : {};
     const tabs = results[1].status === 'fulfilled' ? (results[1].value || {}) : {};
@@ -1860,7 +1958,12 @@ async function softResetToSiteDefaultLanguage() {
       stableToCurrentTabSlug[baseKey] = slug;
     }
 
-    const baseAllowed = new Set(Object.values(posts).map(v => String(v.location)));
+    const baseAllowed = new Set();
+    Object.values(posts).forEach(v => {
+      if (!v) return;
+      if (v.location) baseAllowed.add(String(v.location));
+      if (Array.isArray(v.versions)) v.versions.forEach(ver => { if (ver && ver.location) baseAllowed.add(String(ver.location)); });
+    });
     if (rawIndex && typeof rawIndex === 'object' && !Array.isArray(rawIndex)) {
       try {
         for (const [, entry] of Object.entries(rawIndex)) {
@@ -1868,16 +1971,36 @@ async function softResetToSiteDefaultLanguage() {
           for (const [k, v] of Object.entries(entry)) {
             if (['tag','tags','image','date','excerpt','thumb','cover'].includes(k)) continue;
             if (k === 'location' && typeof v === 'string') { baseAllowed.add(String(v)); continue; }
+            if (Array.isArray(v)) { v.forEach(item => { if (typeof item === 'string') baseAllowed.add(String(item)); }); continue; }
             if (v && typeof v === 'object' && typeof v.location === 'string') baseAllowed.add(String(v.location));
             else if (typeof v === 'string') baseAllowed.add(String(v));
           }
-        }
-      } catch (_) {}
+    }
+  } catch (_) {}
+  // Wire up version selector (if multiple versions available)
+  try {
+    const verSel = document.querySelector('#mainview .post-meta-card select.post-version-select');
+    if (verSel) {
+      verSel.addEventListener('change', (e) => {
+        try {
+          const loc = String(e.target.value || '').trim();
+          if (!loc) return;
+          // Build an explicit URL to avoid any helper side effects
+          const url = new URL(window.location.href);
+          url.searchParams.set('id', loc);
+          const lang = (getCurrentLang && getCurrentLang()) || 'en';
+          url.searchParams.set('lang', lang);
+          window.location.assign(url.toString());
+        } catch (_) {}
+      });
+    }
+  } catch (_) {}
     }
     allowedLocations = baseAllowed;
     postsByLocationTitle = {};
     for (const [title, meta] of Object.entries(posts)) {
       if (meta && meta.location) postsByLocationTitle[meta.location] = title;
+      if (meta && Array.isArray(meta.versions)) meta.versions.forEach(ver => { if (ver && ver.location) postsByLocationTitle[ver.location] = title; });
     }
     postsIndexCache = posts;
     locationAliasMap = new Map();
@@ -1896,15 +2019,33 @@ async function softResetToSiteDefaultLanguage() {
               variants.push({ lang: 'default', location: String(v) });
             } else if (typeof v === 'string') {
               variants.push({ lang: nk, location: String(v) });
+            } else if (Array.isArray(v)) {
+              // For version arrays, include all paths for aliasing
+              v.forEach(item => { if (typeof item === 'string') variants.push({ lang: nk, location: String(item) }); });
             } else if (v && typeof v === 'object' && typeof v.location === 'string') {
               variants.push({ lang: nk, location: String(v.location) });
             }
           }
           if (!variants.length) continue;
           const findBy = (langs) => variants.find(x => langs.includes(x.lang));
-          let chosen = findBy([curNorm]) || findBy(['en']) || findBy(['default']) || variants[0];
-          if (!chosen) chosen = variants[0];
-          variants.forEach(v => { if (v.location && chosen.location) locationAliasMap.set(v.location, chosen.location); });
+          // Prefer the primary location for the current language as computed in postsIndexCache
+          let chosen = null;
+          let chosenLocation = null;
+          try {
+            const seed = findBy([curNorm]) || findBy(['en']) || findBy(['default']) || variants[0];
+            if (seed && postsByLocationTitle && postsIndexCache) {
+              const title = postsByLocationTitle[seed.location];
+              const meta = title ? postsIndexCache[title] : null;
+              if (meta && meta.location) chosenLocation = String(meta.location);
+            }
+          } catch (_) {}
+          if (chosenLocation) {
+            chosen = { lang: curNorm, location: chosenLocation };
+          } else {
+            chosen = findBy([curNorm]) || findBy(['en']) || findBy(['default']) || variants[0];
+            if (!chosen) chosen = variants[0];
+          }
+          variants.forEach(v => { if (v.location && chosen.location && v.lang !== curNorm) locationAliasMap.set(v.location, chosen.location); });
         }
       }
     } catch (_) {}
@@ -1958,6 +2099,11 @@ try { window.__ns_softResetLang = () => softResetToSiteDefaultLanguage(); } catc
 loadSiteConfig()
   .then(cfg => {
     siteConfig = cfg || {};
+    // Apply content root override early so subsequent loads honor it
+    try {
+      const rawRoot = (siteConfig && (siteConfig.contentRoot || siteConfig.contentBase || siteConfig.contentPath)) || 'wwwroot';
+      if (typeof window !== 'undefined') window.__ns_content_root = String(rawRoot).replace(/^\/+|\/+$/g, '');
+    } catch (_) {}
     // Apply site-configured defaults early
     try {
       // 1) Page size (pagination)
@@ -1986,11 +2132,12 @@ loadSiteConfig()
 
     // Now fetch localized content and tabs for the (possibly updated) language
     return Promise.allSettled([
-      loadContentJson('wwwroot', 'index'),
-      loadTabsJson('wwwroot', 'tabs'),
+      loadContentJson(getContentRoot(), 'index'),
+      loadTabsJson(getContentRoot(), 'tabs'),
       (async () => {
         try {
-          const obj = await fetchConfigWithYamlFallback(['wwwroot/index.yaml','wwwroot/index.yml']);
+          const cr = getContentRoot();
+          const obj = await fetchConfigWithYamlFallback([`${cr}/index.yaml`,`${cr}/index.yml`]);
           return (obj && typeof obj === 'object') ? obj : null;
         } catch (_) { return null; }
       })()
@@ -2016,7 +2163,12 @@ loadSiteConfig()
     // Build a whitelist of allowed post file paths. Start with the current-language
     // transformed entries, then include any language-variant locations discovered
     // from the raw unified index.yaml (if present).
-    const baseAllowed = new Set(Object.values(posts).map(v => String(v.location)));
+    const baseAllowed = new Set();
+    Object.values(posts).forEach(v => {
+      if (!v) return;
+      if (v.location) baseAllowed.add(String(v.location));
+      if (Array.isArray(v.versions)) v.versions.forEach(ver => { if (ver && ver.location) baseAllowed.add(String(ver.location)); });
+    });
     if (rawIndex && typeof rawIndex === 'object' && !Array.isArray(rawIndex)) {
       try {
         for (const [, entry] of Object.entries(rawIndex)) {
@@ -2024,8 +2176,14 @@ loadSiteConfig()
           for (const [k, v] of Object.entries(entry)) {
             // Skip known non-variant keys
             if (['tag','tags','image','date','excerpt','thumb','cover'].includes(k)) continue;
-            // Support both unified and legacy shapes
+            const nk = normalizeLangKey(k);
+            const cur = (getCurrentLang && getCurrentLang()) || 'en';
+            const curNorm = normalizeLangKey(cur);
+            const allowLang = (nk === 'default' || nk === curNorm || k === 'location');
+            if (!allowLang) continue;
+            // Support both unified and legacy shapes (only for allowed languages)
             if (k === 'location' && typeof v === 'string') { baseAllowed.add(String(v)); continue; }
+            if (Array.isArray(v)) { v.forEach(item => { if (typeof item === 'string') baseAllowed.add(String(item)); }); continue; }
             if (v && typeof v === 'object' && typeof v.location === 'string') baseAllowed.add(String(v.location));
             else if (typeof v === 'string') baseAllowed.add(String(v));
           }
@@ -2036,6 +2194,7 @@ loadSiteConfig()
     postsByLocationTitle = {};
     for (const [title, meta] of Object.entries(posts)) {
       if (meta && meta.location) postsByLocationTitle[meta.location] = title;
+      if (meta && Array.isArray(meta.versions)) meta.versions.forEach(ver => { if (ver && ver.location) postsByLocationTitle[ver.location] = title; });
     }
     postsIndexCache = posts;
     // Build cross-language location alias map so switching languages keeps the same article
@@ -2055,15 +2214,32 @@ loadSiteConfig()
               variants.push({ lang: 'default', location: String(v) });
             } else if (typeof v === 'string') {
               variants.push({ lang: nk, location: String(v) });
+            } else if (Array.isArray(v)) {
+              v.forEach(item => { if (typeof item === 'string') variants.push({ lang: nk, location: String(item) }); });
             } else if (v && typeof v === 'object' && typeof v.location === 'string') {
               variants.push({ lang: nk, location: String(v.location) });
             }
           }
           if (!variants.length) continue;
           const findBy = (langs) => variants.find(x => langs.includes(x.lang));
-          let chosen = findBy([curNorm]) || findBy(['en']) || findBy(['default']) || variants[0];
-          if (!chosen) chosen = variants[0];
-          variants.forEach(v => { if (v.location && chosen.location) locationAliasMap.set(v.location, chosen.location); });
+          // Prefer the primary location for the current language as computed in postsIndexCache
+          let chosen = null;
+          let chosenLocation = null;
+          try {
+            const seed = findBy([curNorm]) || findBy(['en']) || findBy(['default']) || variants[0];
+            if (seed && postsByLocationTitle && postsIndexCache) {
+              const title = postsByLocationTitle[seed.location];
+              const meta = title ? postsIndexCache[title] : null;
+              if (meta && meta.location) chosenLocation = String(meta.location);
+            }
+          } catch (_) {}
+          if (chosenLocation) {
+            chosen = { lang: curNorm, location: chosenLocation };
+          } else {
+            chosen = findBy([curNorm]) || findBy(['en']) || findBy(['default']) || variants[0];
+            if (!chosen) chosen = variants[0];
+          }
+          variants.forEach(v => { if (v.location && chosen.location && v.lang !== curNorm) locationAliasMap.set(v.location, chosen.location); });
         }
       }
     } catch (_) { /* ignore alias build errors */ }

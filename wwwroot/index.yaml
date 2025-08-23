@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=../assets/schema/index.json
 
 headless:
-  en: post/headless.md
+  en: post/headless/main.md
 volcal_baseline:
   en: post/volcal_baseline/main.md
 xr2023:

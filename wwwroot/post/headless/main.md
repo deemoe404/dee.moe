@@ -12,6 +12,8 @@ author: deemoe
 
 I’ve always been a fan of **using a single computer for everything**. Back when I was on Windows, my setup was a ThinkPad X1 Extreme paired with a Thunderbolt GPU dock—one machine to handle it all. But as Windows grew increasingly bloated and less efficient, I started searching for alternatives.
 
+![thinkpad](thinkpad.jpeg)
+
 My first attempt was with Arch Linux. I loved the freedom to customize every detail. However, I soon found myself spending more time tweaking and maintaining the system than actually getting things done. Around that time, Apple announced the M2 MacBook Air, promising a fanless, silent, and efficient laptop. As someone who’s always loved lightweight laptops (my ThinkPad was a favorite for cramming high-voltage Intel CPUs into a slim chassis), I decided to give it a shot.
 
 As I worked with it, I realized the operating system wasn’t really a dealbreaker for most modern workflows. Nearly all of my daily tasks were handled by cross-platform apps like VSCode, Chrome, or web-based tools. What truly made a difference was the fanless, slim design. The impressive battery life, strong M2 performance, and Unix-like environment (installing MacTeX was a breeze) were just added bonuses—but those are topics for another post.

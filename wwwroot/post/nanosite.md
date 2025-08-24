@@ -1,5 +1,5 @@
 ---
-title: 在“后互联网时代”继续写作的意义与 NanoSite
+title: “后互联网时代”与 NanoSite
 date: 2025-08-24
 tags:
   - 日志

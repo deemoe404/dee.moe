@@ -6,6 +6,8 @@ tags:
   - Technology
 excerpt: I aimed to streamline my workflow using a single machine but encountered limitations across platforms—Windows became unstable, Arch required excessive maintenance, and macOS lacked NVIDIA GPU support. Ultimately, I adopted a headless Linux setup accessed via SSH and VSCode with Dev Containers from my Mac. This approach offers stability, flexibility, and strong remote development capabilities—though GUI dependencies still remain unavoidable in some cases.
 author: deemoe
+ai: true
+draft: true
 ---
 
 ## The Myth of the Perfect Setup

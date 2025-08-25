@@ -46,6 +46,7 @@ const translations = {
       pageUnavailable: 'Page Unavailable',
       indexUnavailable: 'Index unavailable',
       backToAllPosts: 'Back to all posts',
+      backToHome: 'Back to home',
       noResultsTitle: 'No results',
       noResultsBody: (q) => `No posts found for "${q}".`,
       tags: 'Tags',
@@ -59,7 +60,9 @@ const translations = {
       warning: 'Warning',
       error: 'Error',
       aiFlagLabel: 'AI-assisted',
-      aiFlagTooltip: 'AI-assisted: generated or edited with an LLM'
+      aiFlagTooltip: 'AI-assisted: generated or edited with an LLM',
+      draftBadge: 'Draft',
+      draftNotice: 'This post is a draft and may change.'
     },
     code: {
       copy: 'Copy',
@@ -119,6 +122,7 @@ const translations = {
       pageUnavailable: '页面不可用',
       indexUnavailable: '索引不可用',
       backToAllPosts: '返回全部文章',
+      backToHome: '返回首页',
       noResultsTitle: '没有结果',
       noResultsBody: (q) => `未找到与 “${q}” 匹配的文章。`,
       tags: '标签',
@@ -132,7 +136,9 @@ const translations = {
       warning: '警告',
       error: '错误',
       aiFlagLabel: 'AI 参与',
-      aiFlagTooltip: 'AI 参与：本文由生成式 LLM 生成或修改'
+      aiFlagTooltip: 'AI 参与：本文由生成式 LLM 生成或修改',
+      draftBadge: '草稿',
+      draftNotice: '本文仍在撰写/修改中，内容可能随时变更。'
     },
     code: {
       copy: '复制',
@@ -192,6 +198,7 @@ const translations = {
       pageUnavailable: 'ページを表示できません',
       indexUnavailable: 'インデックスを読み込めません',
       backToAllPosts: 'すべての記事へ戻る',
+      backToHome: 'ホームに戻る',
       noResultsTitle: '結果なし',
       noResultsBody: (q) => `「${q}」に一致する記事は見つかりませんでした。`,
       tags: 'タグ',
@@ -205,7 +212,9 @@ const translations = {
       warning: '警告',
       error: 'エラー',
       aiFlagLabel: 'AI 参加',
-      aiFlagTooltip: 'AI 参加：本記事は生成系LLMで生成・編集されています'
+      aiFlagTooltip: 'AI 参加：本記事は生成系LLMで生成・編集されています',
+      draftBadge: '下書き',
+      draftNotice: 'この記事は執筆中・編集中です。内容は変更される場合があります。'
     },
     code: {
       copy: 'コピー',
@@ -449,6 +458,7 @@ async function loadContentFromFrontMatter(obj, lang) {
           excerpt: frontMatter.excerpt || undefined,
           versionLabel: frontMatter.version || undefined,
           ai: truthy(frontMatter.ai || frontMatter.aiGenerated || frontMatter.llm) || undefined,
+          draft: truthy(frontMatter.draft || frontMatter.wip || frontMatter.unfinished || frontMatter.inprogress) || undefined,
           __title: frontMatter.title || undefined
         });
       } catch (error) {

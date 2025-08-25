@@ -35,7 +35,7 @@ defaultLanguage: en       # Default UI/content language (e.g., en, zh, ja)
 
 # Theme override configurations
 themeMode: user
-themePack: minimalism
+themePack: native
 themeOverride: true
 
 # Asset warnings configurations

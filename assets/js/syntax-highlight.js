@@ -31,6 +31,21 @@ const highlightRules = {
     { type: 'tag', pattern: /<\/?[\w\-]+(?:\s+[\w\-]+(=(?:"[^"]*"|'[^']*'|[^\s>]+))?)*\s*\/?>/g }
   ],
   
+  // XML — add PI, CDATA, strings, numbers, and tags
+  xml: [
+    // XML comments
+    { type: 'comment', pattern: /<!--[\s\S]*?-->/g },
+    // XML declaration / processing instructions, e.g., <?xml version="1.0"?>
+    { type: 'preprocessor', pattern: /<\?[\s\S]*?\?>/g },
+    // CDATA sections (treat as comments for readability)
+    { type: 'comment', pattern: /<!\[CDATA\[[\s\S]*?\]\]>/g },
+    // Attribute/string values
+    { type: 'string', pattern: /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g },
+    // (Temporarily disable XML number highlighting to avoid content corruption)
+    // Tags (names + attributes)
+    { type: 'tag', pattern: /<\/?[\w\-:.]+(?:\s+[\w\-:.]+(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?)*\s*\/?>/g }
+  ],
+  
   css: [
     { type: 'comment', pattern: /\/\*[\s\S]*?\*\//g },
     { type: 'selector', pattern: /[.#]?[\w\-]+(?:\[[\w\-]+(?:="[^"]*")?\])*(?:::?[\w\-]+)?/g },
@@ -68,43 +83,149 @@ const highlightRules = {
   ],
 
   // YAML / YML — light but useful highlighting
+  // Order matters: keys -> strings -> comments (so '#' inside quotes is preserved)
   yaml: [
-    // comments
-    { type: 'comment', pattern: /#.*$/gm },
     // keys (match key and colon together; simple but effective)
     { type: 'property', pattern: /(^|\n)\s*[-\s]*([A-Za-z_][\w\-\.]*|"(?:[^"\\]|\\.)*"|'[^']*')\s*:/g },
-    // booleans and null-like
-    { type: 'keyword', pattern: /\b(true|false|on|off|yes|no|null)\b/gi },
-    // numbers
-    { type: 'number', pattern: /\b-?\d+(?:\.\d+)?\b/g },
     // strings (quoted)
     { type: 'string', pattern: /"(?:[^"\\]|\\.)*"|'[^']*'/g },
+    // comments (after strings so '#' inside quotes are not treated as comments)
+    { type: 'comment', pattern: /#.*$/gm },
+    // dates and times as whole tokens
+    { type: 'number', pattern: /\b\d{4}-\d{2}-\d{2}\b/g },
+    { type: 'number', pattern: /\b\d{2}:\d{2}(?::\d{2})?\b/g },
     // anchors & aliases
     { type: 'variables', pattern: /[&*][A-Za-z0-9_\-]+/g },
     // tags like !Ref, !!str
     { type: 'preprocessor', pattern: /!{1,2}[A-Za-z0-9_:\-]+/g },
-    // punctuation tokens
-    { type: 'punctuation', pattern: /[:{},\[\]\-]>?/g }
+    // booleans and null-like
+    { type: 'keyword', pattern: /\b(true|false|on|off|yes|no|null)\b/gi },
+    // numbers
+    { type: 'number', pattern: /\b-?\d+(?:\.\d+)?\b/g },
+    // punctuation tokens (include block scalar indicators)
+    { type: 'punctuation', pattern: /[:{},\[\]\-|>]/g }
   ],
 
   // Alias for `.yml`
   yml: [
-    { type: 'comment', pattern: /#.*$/gm },
     { type: 'property', pattern: /(^|\n)\s*[-\s]*([A-Za-z_][\w\-\.]*|"(?:[^"\\]|\\.)*"|'[^']*')\s*:/g },
-    { type: 'keyword', pattern: /\b(true|false|on|off|yes|no|null)\b/gi },
-    { type: 'number', pattern: /\b-?\d+(?:\.\d+)?\b/g },
     { type: 'string', pattern: /"(?:[^"\\]|\\.)*"|'[^']*'/g },
+    { type: 'comment', pattern: /#.*$/gm },
+    { type: 'number', pattern: /\b\d{4}-\d{2}-\d{2}\b/g },
+    { type: 'number', pattern: /\b\d{2}:\d{2}(?::\d{2})?\b/g },
     { type: 'variables', pattern: /[&*][A-Za-z0-9_\-]+/g },
     { type: 'preprocessor', pattern: /!{1,2}[A-Za-z0-9_:\-]+/g },
-    { type: 'punctuation', pattern: /[:{},\[\]\-]>?/g }
+    { type: 'keyword', pattern: /\b(true|false|on|off|yes|no|null)\b/gi },
+    { type: 'number', pattern: /\b-?\d+(?:\.\d+)?\b/g },
+    { type: 'punctuation', pattern: /[:{},\[\]\-|>]/g }
+  ],
+
+  // robots.txt — highlight directives, comments, URLs and numbers
+  robots: [
+    // Line-leading directive token and its first colon (treat as a keyword block)
+    // e.g. "User-agent:" "Disallow:" "Sitemap:" etc., including custom directives
+    { type: 'keyword', pattern: /^\s*[A-Za-z][A-Za-z-]*\s*:/gm },
+    // Comments
+    { type: 'comment', pattern: /#.*$/gm },
+    // Known directives anywhere in line (fallback if not at start)
+    { type: 'keyword', pattern: /\b(User-agent|Disallow|Allow|Sitemap|Crawl-delay|Host|Clean-param)\b/gi },
+    // URLs
+    { type: 'string', pattern: /(https?:\/\/[^\s#]+)/gi },
+    // Numbers (e.g., Crawl-delay)
+    { type: 'number', pattern: /\b\d+\b/g },
+    // Wildcards and leftover punctuation
+    { type: 'punctuation', pattern: /[/*$]/g }
   ]
 };
+
+// 专用的 HTML 高亮（标签名、属性名、等号、字符串分别着色）
+function highlightHtmlRich(raw) {
+  if (!raw) return '';
+  const esc = (t) => {
+    return String(t || '').replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m]));
+  };
+  const renderTag = (tagRaw) => {
+    try {
+      // Parse basics
+      const isClosing = /^<\//.test(tagRaw);
+      const selfClose = /\/\s*>$/.test(tagRaw);
+      const endTrim = selfClose ? 2 : 1; // '/>' vs '>'
+      const startTrim = isClosing ? 2 : 1; // '</' vs '<'
+      const inner = tagRaw.slice(startTrim, tagRaw.length - endTrim);
+      const m = inner.match(/^\s*([A-Za-z][A-Za-z0-9:-]*)([\s\S]*)$/);
+      if (!m) return esc(tagRaw);
+      const tagName = m[1] || '';
+      let attrChunk = m[2] || '';
+      let out = '';
+      // Leading < or </ and tag name
+      out += `<span class="syntax-tag">&lt;${isClosing ? '/' : ''}${esc(tagName)}</span>`;
+      if (!isClosing && attrChunk) {
+        // Walk attributes while preserving spacing
+        const attrRegex = /(\s+)([A-Za-z_:][\w:.-]*)(?:\s*(=)\s*("[^"\\]*"|'[^'\\]*'|[^\s"'=<>`]+))?/g;
+        let lastIndex = 0; let part = '';
+        let am;
+        while ((am = attrRegex.exec(attrChunk)) !== null) {
+          // Append any skipped raw text (unlikely)
+          if (am.index > lastIndex) { part += esc(attrChunk.slice(lastIndex, am.index)); }
+          const space = am[1] || '';
+          const name = am[2] || '';
+          const eq = am[3] || '';
+          const val = am[4];
+          part += space;
+          part += `<span class=\"syntax-property\">${esc(name)}</span>`;
+          if (eq) {
+            part += `<span class=\"syntax-operator\">=</span>`;
+            if (val != null) {
+              if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                const q = val[0];
+                const inner = val.slice(1, -1);
+                part += `<span class=\"syntax-string\">${esc(q + inner + q)}</span>`;
+              } else {
+                part += `<span class=\"syntax-string\">${esc(val)}</span>`;
+              }
+            }
+          }
+          lastIndex = attrRegex.lastIndex;
+        }
+        // Trailing text in attrChunk
+        if (lastIndex < attrChunk.length) part += esc(attrChunk.slice(lastIndex));
+        out += part;
+      }
+      // Trailing /> or >
+      out += `<span class=\"syntax-tag\">${selfClose ? '/&gt;' : '&gt;'}</span>`;
+      return out;
+    } catch (_) {
+      return esc(tagRaw);
+    }
+  };
+  // Walk the string and replace comments/tags, escape the rest
+  const tokenRe = /<!--[\s\S]*?-->|<\/?[A-Za-z][A-Za-z0-9:-]*\s*[^>]*>?/g;
+  let out = '';
+  let i = 0; let m;
+  while ((m = tokenRe.exec(raw)) !== null) {
+    const start = m.index; const end = tokenRe.lastIndex;
+    if (start > i) out += esc(raw.slice(i, start));
+    const tok = m[0];
+    if (tok.startsWith('<!--')) {
+      out += `<span class=\"syntax-comment\">${esc(tok)}</span>`;
+    } else {
+      out += renderTag(tok);
+    }
+    i = end;
+  }
+  if (i < raw.length) out += esc(raw.slice(i));
+  return out;
+}
 
 // 主高亮函数
 function simpleHighlight(code, language) {
   if (!code || !language) return escapeHtml(code || '');
   
   const lang = language.toLowerCase();
+  // 为 HTML 启用更细粒度的高亮（支持属性名/值/等号）
+  if (lang === 'html' || lang === 'htm') {
+    try { return highlightHtmlRich(code); } catch (_) {}
+  }
   const rules = highlightRules[lang];
   
   if (!rules) return escapeHtml(code);
@@ -151,6 +272,9 @@ function simpleHighlight(code, language) {
   result = result.replace(/__HIGHLIGHTED__(\w+)__([\s\S]*?)__END__/g, (match, type, content) => {
     return `<span class="syntax-${type}">${content}</span>`;
   });
+
+  // 兜底：清理任何可能泄漏到界面的标记残留
+  result = cleanupMarkerArtifacts(result);
   
   return result;
 }
@@ -166,6 +290,24 @@ function escapeHtml(text) {
     "'": '&#039;'
   };
   return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+// 清理任何可能遗留在可视层的占位标记，防御性处理
+function cleanupMarkerArtifacts(html) {
+  if (!html) return html;
+  let out = String(html);
+  // 通用：仅处理带显式结束标记的形式，避免跨段误吞
+  out = out.replace(/__H[A-Z]*?__([A-Za-z-]+)__([\s\S]*?)(?:__END__|__E__)/gi, (m, t, c) => `<span class="syntax-${t.toLowerCase()}">${c}</span>`);
+  // 具体已知形式（冗余加强）
+  out = out.replace(/__HIGHLIGHTED__(\w+)__([\s\S]*?)__END__/g, (m, t, c) => `<span class="syntax-${t}">${c}</span>`);
+  out = out.replace(/__H__(\w+)__([\s\S]*?)__E__/g, (m, t, c) => `<span class="syntax-${t}">${c}</span>`);
+  out = out.replace(/__HILIGHTED__(\w+)__([\s\S]*?)__/g, (m, t, c) => `<span class="syntax-${t}">${c}</span>`);
+  // 移除孤立类型标记（未成对的 __tag__/__number__ 等）
+  out = out.replace(/__(tag|string|number|comment|operator|punctuation|property|selector|preprocessor|variables|keyword|attributes)__+/gi, '');
+  // 终极兜底：去掉任何残留的起止标记，保留内容
+  out = out.replace(/__H[A-Z_]*__/g, '');
+  out = out.replace(/__(?:END|E)__/g, '');
+  return out;
 }
 
 // 检测代码语言
@@ -223,6 +365,8 @@ export function initSyntaxHighlighting() {
   codeBlocks.forEach(codeElement => {
     const preElement = codeElement.closest('pre');
     if (!preElement) return;
+    // Skip editor-internal pre blocks (handled by hieditor)
+    if (preElement.classList && preElement.classList.contains('hi-pre')) return;
     
     // 获取语言信息
     let language = null;
@@ -235,17 +379,36 @@ export function initSyntaxHighlighting() {
         break;
       }
     }
+    // 允许通过标记禁用高亮和复制：`nohighlight`、`plain`、`text` 或 data-nohighlight
+    const hasNoHighlightFlag = (
+      preElement.classList.contains('nohighlight') ||
+      codeElement.classList.contains('nohighlight') ||
+      codeElement.hasAttribute('data-nohighlight') ||
+      preElement.hasAttribute('data-nohighlight') ||
+      codeElement.classList.contains('plain') ||
+      codeElement.classList.contains('text') ||
+      classList.includes('language-plain') ||
+      classList.includes('language-text') ||
+      classList.includes('language-none') ||
+      classList.includes('language-raw')
+    );
     
     // 如果没有找到语言，尝试自动检测
     if (!language) {
       language = detectLanguage(codeElement.textContent);
     }
+
+    // 归一化并确定是否应禁用增强（复制按钮与高亮）
+    const normLang = (language || '').toLowerCase();
+    const isPlain = !normLang || normLang === 'plain' || normLang === 'text' || normLang === 'raw' || normLang === 'none';
+    const isSupported = !!(normLang && highlightRules[normLang]);
+    const disableEnhance = hasNoHighlightFlag || isPlain || !isSupported; // 未检测/不支持/显式plain
     
     // 记录原始代码文本用于行号计算
     const originalCode = codeElement.textContent || '';
 
-    // 应用语法高亮（若识别到语言且支持）
-    if (language && highlightRules[language.toLowerCase()]) {
+    // 应用语法高亮（若识别到语言且支持，且未禁用）
+    if (!disableEnhance && language && highlightRules[language.toLowerCase()]) {
       const highlightedCode = simpleHighlight(originalCode, language);
       codeElement.innerHTML = highlightedCode;
 
@@ -313,7 +476,7 @@ export function initSyntaxHighlighting() {
       gutter.style.width = `${Math.max(2, digits + 1)}ch`;
     }
       
-      // 添加/增强语言标签（支持悬浮复制与点击复制）
+      // 始终显示语言标签/复制按钮；当禁用高亮时标签显示为 PLAIN
       let languageLabel = preElement.querySelector('.syntax-language-label');
       if (!languageLabel) {
         languageLabel = document.createElement('div');
@@ -331,15 +494,15 @@ export function initSyntaxHighlighting() {
       const TXT_FAILED = getT('code.failed', 'Failed');
       const TXT_ARIA = getT('code.copyAria', 'Copy code');
 
-      const langText = (language || '').toUpperCase();
-      languageLabel.dataset.lang = langText;
+      const langText = disableEnhance ? 'PLAIN' : (language || '').toUpperCase();
+      languageLabel.dataset.lang = langText || 'PLAIN';
       languageLabel.setAttribute('role', 'button');
       languageLabel.setAttribute('tabindex', '0');
-  languageLabel.setAttribute('aria-label', TXT_ARIA);
-      languageLabel.textContent = langText;
+      languageLabel.setAttribute('aria-label', TXT_ARIA);
+      languageLabel.textContent = langText || 'PLAIN';
       
       if (!languageLabel.dataset.bound) {
-  const copyCode = async () => {
+        const copyCode = async () => {
           const rawText = codeElement.textContent || '';
           let ok = false;
           if (navigator.clipboard && window.isSecureContext) {
@@ -360,7 +523,7 @@ export function initSyntaxHighlighting() {
           }
 
           // 反馈
-          const old = languageLabel.dataset.lang || 'CODE';
+          const old = languageLabel.dataset.lang || 'PLAIN';
           languageLabel.classList.add('is-copied');
           languageLabel.textContent = ok ? TXT_COPIED.toUpperCase() : TXT_FAILED.toUpperCase();
           setTimeout(() => {
@@ -375,7 +538,7 @@ export function initSyntaxHighlighting() {
         });
         languageLabel.addEventListener('mouseleave', () => {
           languageLabel.classList.remove('is-hover');
-          languageLabel.textContent = languageLabel.dataset.lang || 'CODE';
+          languageLabel.textContent = languageLabel.dataset.lang || 'PLAIN';
         });
         languageLabel.addEventListener('click', copyCode);
         languageLabel.addEventListener('keydown', (e) => {

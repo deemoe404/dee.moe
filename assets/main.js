@@ -17,8 +17,9 @@ import { prefersReducedMotion, getArticleTitleFromMain } from './js/dom-utils.js
 import { renderPostMetaCard, renderOutdatedCard } from './js/templates.js';
 import { applyLangHints } from './js/typography.js';
 
-// Lightweight fetch helper
-const getFile = (filename) => fetch(filename).then(resp => { if (!resp.ok) throw new Error(`HTTP ${resp.status}`); return resp.text(); });
+// Lightweight fetch helper (bypass caches without version params)
+const getFile = (filename) => fetch(String(filename || ''), { cache: 'no-store' })
+  .then(resp => { if (!resp.ok) throw new Error(`HTTP ${resp.status}`); return resp.text(); });
 
 let postsByLocationTitle = {};
 let tabsBySlug = {};
@@ -269,6 +270,30 @@ async function loadSiteConfig() {
   } catch (_) { return {}; }
 }
 
+// For critical UI images (like avatar), fetch with no-store and set a blob URL
+function setImageSrcNoStore(img, src) {
+  try {
+    if (!img) return;
+    const val = String(src || '').trim();
+    if (!val) return;
+    // data:/blob:/absolute URLs — leave as-is
+    if (/^(data:|blob:)/i.test(val)) { img.setAttribute('src', val); return; }
+    if (/^[a-z][a-z0-9+.-]*:/i.test(val)) { img.setAttribute('src', val); return; }
+    // Relative or same-origin absolute: fetch fresh and use an object URL
+    let abs = val;
+    try { abs = new URL(val, window.location.href).toString(); } catch (_) {}
+    fetch(abs, { cache: 'no-store' })
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+      .then(b => {
+        const url = URL.createObjectURL(b);
+        try { const prev = img.dataset.blobUrl; if (prev) URL.revokeObjectURL(prev); } catch (_) {}
+        img.dataset.blobUrl = url;
+        img.setAttribute('src', url);
+      })
+      .catch(() => { img.setAttribute('src', val); });
+  } catch (_) { try { img.setAttribute('src', src); } catch(__) {} }
+}
+
 function renderSiteLinks(cfg) {
   try {
     const root = document.querySelector('.site-card .social-links');
@@ -317,7 +342,7 @@ function renderSiteIdentity(cfg) {
     }
     if (avatar) {
       const img = document.querySelector('.site-card .avatar');
-      if (img) img.setAttribute('src', avatar);
+      if (img) setImageSrcNoStore(img, avatar);
     }
   } catch (_) { /* noop */ }
 }
@@ -369,63 +394,89 @@ function hydratePostImages(container) {
     if (!root) return;
     const candidates = Array.from(root.querySelectorAll('img'))
       .filter(img => !img.classList.contains('card-cover'))
-      .filter(img => !img.closest('table'));
+      .filter(img => !img.closest('table'))
+      .filter(img => !img.closest('figure'));
   candidates.forEach(img => {
       // Skip if already in a wrapper
       if (img.closest('.post-image-wrap')) return;
       // If the image lives inside a paragraph with other text, avoid restructuring
       const p = img.parentElement && img.parentElement.tagName === 'P' ? img.parentElement : null;
-      if (p) {
-        const onlyThisImg = (p.childElementCount === 1) && (p.textContent.trim() === '');
-        if (!onlyThisImg) return;
-      }
+      const onlyThisImg = p ? (p.childElementCount === 1 && p.textContent.trim() === '') : false;
 
-      const wrap = document.createElement('div');
-      wrap.className = 'post-image-wrap';
-      // Prefer explicit attributes for ratio if present
-      const wAttr = parseInt(img.getAttribute('width') || '', 10);
-      const hAttr = parseInt(img.getAttribute('height') || '', 10);
-      if (!isNaN(wAttr) && !isNaN(hAttr) && wAttr > 0 && hAttr > 0) {
-        wrap.style.aspectRatio = `${wAttr} / ${hAttr}`;
-      }
-      const ph = document.createElement('div');
-      ph.className = 'ph-skeleton';
-      ph.setAttribute('aria-hidden', 'true');
-
-      // Move image inside wrapper
-      const targetParent = p || img.parentElement;
-      if (!targetParent) return;
-      targetParent.insertBefore(wrap, img);
-      wrap.appendChild(ph);
-      wrap.appendChild(img);
-
-      img.classList.add('post-img');
-      if (!img.hasAttribute('loading')) img.setAttribute('loading', 'lazy');
-      if (!img.hasAttribute('decoding')) img.setAttribute('decoding', 'async');
-
-      const src = img.getAttribute('src');
-      if (src) {
-        img.setAttribute('data-src', src);
-        img.removeAttribute('src');
-      }
-
-      const done = () => {
-        // Set exact ratio once we know it
-        if (img.naturalWidth && img.naturalHeight) {
-          wrap.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+      // Helper to create wrapper + skeleton and wire lazy fade-in
+      const setupWrap = (hostEl, nodeToMove) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'post-image-wrap';
+        // Prefer explicit attributes for ratio if present
+        const wAttr = parseInt(img.getAttribute('width') || '', 10);
+        const hAttr = parseInt(img.getAttribute('height') || '', 10);
+        if (!isNaN(wAttr) && !isNaN(hAttr) && wAttr > 0 && hAttr > 0) {
+          wrap.style.aspectRatio = `${wAttr} / ${hAttr}`;
         }
-        img.classList.add('is-loaded');
-        if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
-      };
-      if (img.complete && img.naturalWidth > 0) { done(); }
-      else {
-        img.addEventListener('load', done, { once: true });
-        img.addEventListener('error', () => { if (ph && ph.parentNode) ph.parentNode.removeChild(ph); img.style.opacity = '1'; }, { once: true });
-      }
+        const ph = document.createElement('div');
+        ph.className = 'ph-skeleton';
+        ph.setAttribute('aria-hidden', 'true');
 
-      // Kick off load after wiring handlers
-      const ds = img.getAttribute('data-src');
-      if (ds) img.src = ds;
+        // Insert wrapper next to the image/link when in same parent; otherwise append
+        try {
+          if (nodeToMove && nodeToMove.parentElement === hostEl) hostEl.insertBefore(wrap, nodeToMove);
+          else hostEl.appendChild(wrap);
+        } catch (_) { hostEl.appendChild(wrap); }
+        wrap.appendChild(ph);
+        wrap.appendChild(nodeToMove || img);
+
+        img.classList.add('post-img');
+        if (!img.hasAttribute('loading')) img.setAttribute('loading', 'lazy');
+        if (!img.hasAttribute('decoding')) img.setAttribute('decoding', 'async');
+
+        const src = img.getAttribute('src');
+        if (src) { img.setAttribute('data-src', src); img.removeAttribute('src'); }
+
+        const done = () => {
+          if (img.naturalWidth && img.naturalHeight) {
+            wrap.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+          }
+          img.classList.add('is-loaded');
+          if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
+        };
+        if (img.complete && img.naturalWidth > 0) { done(); }
+        else {
+          img.addEventListener('load', done, { once: true });
+          img.addEventListener('error', () => { if (ph && ph.parentNode) ph.parentNode.removeChild(ph); img.style.opacity = '1'; }, { once: true });
+        }
+
+        const ds = img.getAttribute('data-src');
+        if (ds) img.src = ds;
+      };
+
+      if (onlyThisImg) {
+        // Upgrade to a semantic figure with figcaption using alt text
+        const alt = (img.getAttribute('alt') || '').trim();
+        const figure = document.createElement('figure');
+        // Insert figure before the paragraph, then move image inside
+        p.parentElement && p.parentElement.insertBefore(figure, p);
+        // If image is wrapped in an anchor directly under <p>, move the anchor as a unit
+        const link = (img.parentElement && img.parentElement.tagName === 'A' && img.parentElement.parentElement === p) ? img.parentElement : null;
+        const nodeToMove = link || img;
+        // Put skeleton wrapper inside figure and move node (img or link)
+        setupWrap(figure, nodeToMove);
+        // Remove empty paragraph shell
+        try { if (p.parentElement) p.parentElement.removeChild(p); } catch (_) {}
+        // Add caption only if we have non-empty alt
+        if (alt) {
+          const cap = document.createElement('figcaption');
+          cap.textContent = alt;
+          figure.appendChild(cap);
+        }
+      } else {
+        // Regular inline/embedded image: wrap in a reserved-ratio container only
+        const targetParent = img.parentElement;
+        if (!targetParent) return;
+        // Move any wrapping anchor along with the image if present
+        const link = (img.parentElement && img.parentElement.tagName === 'A') ? img.parentElement : null;
+        const nodeToMove = link || img;
+        setupWrap(targetParent, nodeToMove);
+      }
     });
   } catch (_) {}
 }
@@ -519,8 +570,57 @@ function hydratePostVideos(container) {
   try {
     const root = typeof container === 'string' ? document.querySelector(container) : (container || document);
     if (!root) return;
+    // Normalize raw HTML <video> markup to match NanoSite's generated structure
     const videos = Array.from(root.querySelectorAll('video'));
-  const queue = videos.filter(video => video && !video.hasAttribute('poster') && video.dataset.autoposterDone !== '1');
+    videos.forEach(video => {
+      try {
+        if (!video.classList.contains('post-video')) video.classList.add('post-video');
+        if (!video.hasAttribute('controls')) video.setAttribute('controls', '');
+        if (!video.hasAttribute('preload')) video.setAttribute('preload', 'metadata');
+        if (!video.hasAttribute('playsinline')) video.setAttribute('playsinline', '');
+        if (!video.closest('.post-video-wrap')) {
+          const wrap = document.createElement('div');
+          wrap.className = 'post-video-wrap';
+          const parent = video.parentElement;
+          if (parent) {
+            parent.insertBefore(wrap, video);
+            wrap.appendChild(video);
+          }
+        }
+        // Ensure browser re-evaluates sources after moving/normalizing
+        try { video.load(); } catch (_) {}
+
+        // Install a lightweight fallback overlay on error
+        try {
+          if (video.dataset.vfInstalled !== '1') {
+            const wrap = video.closest('.post-video-wrap') || video.parentElement;
+            const overlay = document.createElement('div');
+            overlay.className = 'video-fallback';
+            overlay.style.display = 'none';
+            const toAbs = (s) => { try { return new URL(s, window.location.href).toString(); } catch(_) { return s; } };
+            const sources = [video.getAttribute('src'), ...Array.from(video.querySelectorAll('source')).map(s => s.getAttribute('src'))].filter(Boolean);
+            const first = sources.length ? toAbs(sources[0]) : '#';
+            overlay.innerHTML = '<div class="vf-content">'
+              + '<div class="vf-title">Video not available</div>'
+              + '<div class="vf-actions">'
+              + `<a class="vf-link primary" href="${first}" target="_blank" rel="noopener">Open file</a>`
+              + '</div></div>';
+            if (wrap && !wrap.querySelector('.video-fallback')) wrap.appendChild(overlay);
+            const show = () => { overlay.style.display = 'flex'; };
+            const hide = () => { overlay.style.display = 'none'; };
+            video.addEventListener('error', show);
+            video.addEventListener('loadeddata', hide);
+            video.addEventListener('canplay', hide);
+            video.addEventListener('play', hide);
+            // If all sources error, show overlay soon
+            Array.from(video.querySelectorAll('source')).forEach(s => { s.addEventListener('error', show); });
+            video.dataset.vfInstalled = '1';
+          }
+        } catch(_) {}
+      } catch (_) {}
+    });
+    const queue = Array.from(root.querySelectorAll('video'))
+      .filter(video => video && !video.hasAttribute('poster') && video.dataset.autoposterDone !== '1');
 
     const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -542,6 +642,7 @@ function hydratePostVideos(container) {
       setTimeout(() => { cleanup(); resolve(); }, 1200);
     });
 
+    const LITE_POSTER = true; // Avoid seeks/play to improve stability
     const processVideo = async (video) => {
       try {
         // Skip if already set
@@ -684,6 +785,7 @@ function hydratePostVideos(container) {
 
         if (drawPoster()) return;
         if (await captureWithRVFC()) return;
+        if (LITE_POSTER) return; // Skip aggressive strategies in lite mode
         // Avoid aggressive seeks on iOS Safari or QuickTime MOV sources
         const ua = navigator.userAgent || '';
         const isIOS = /iP(hone|ad|od)/.test(ua) || (/Mac/.test(ua) && 'ontouchend' in document);
@@ -833,13 +935,31 @@ function hydrateInternalLinkCards(container) {
   if (exEl && !(meta && meta.excerpt)) exEl.textContent = ex;
         const metaEl = card.querySelector('.card-meta');
         if (metaEl) {
-          const readHtml = `<span class="card-read">${minutes} ${t('ui.minRead')}</span>`;
-          const dEl = metaEl.querySelector('.card-date');
-          const parts = [];
-          if (dEl && dEl.textContent.trim()) parts.push(dEl.outerHTML);
-          parts.push(readHtml);
-          if (meta && meta.draft) parts.push(`<span class="card-draft">${t('ui.draftBadge')}</span>`);
-          metaEl.innerHTML = parts.join('<span class="card-sep">•</span>');
+          // Rebuild meta using DOM nodes instead of HTML strings
+          const items = [];
+          const dateEl = metaEl.querySelector('.card-date');
+          if (dateEl && dateEl.textContent.trim()) items.push(dateEl.cloneNode(true));
+          const read = document.createElement('span');
+          read.className = 'card-read';
+          read.textContent = `${minutes} ${t('ui.minRead')}`;
+          items.push(read);
+          if (meta && meta.draft) {
+            const d = document.createElement('span');
+            d.className = 'card-draft';
+            d.textContent = t('ui.draftBadge');
+            items.push(d);
+          }
+          // Clear and append with separators
+          metaEl.textContent = '';
+          items.forEach((node, idx) => {
+            if (idx > 0) {
+              const sep = document.createElement('span');
+              sep.className = 'card-sep';
+              sep.textContent = '•';
+              metaEl.appendChild(sep);
+            }
+            metaEl.appendChild(node);
+          });
         }
       }).catch(() => {});
     });
@@ -1345,17 +1465,16 @@ function displayPost(postname) {
       const titleEls = Array.from(document.querySelectorAll('#mainview .post-meta-card .post-meta-title'));
       titleEls.forEach((titleEl) => {
         const ai = titleEl.querySelector('.ai-flag');
-        const prefix = ai ? ai.outerHTML : '';
-        titleEl.innerHTML = `${prefix}${escapeHtml(articleTitle)}`;
-        // Re-bind tooltip to fresh ai flag node after innerHTML swap
-        try {
-          const newAi = titleEl.querySelector('.ai-flag');
-          if (newAi) {
-            // Avoid native title tooltip overlap
-            newAi.removeAttribute('title');
-            attachHoverTooltip(newAi, () => t('ui.aiFlagTooltip'), { delay: 0 });
-          }
-        } catch (_) {}
+        const aiClone = ai ? ai.cloneNode(true) : null;
+        // Rebuild title node content safely
+        titleEl.textContent = '';
+        if (aiClone) {
+          // Avoid native title tooltip overlap
+          aiClone.removeAttribute('title');
+          titleEl.appendChild(aiClone);
+          try { attachHoverTooltip(aiClone, () => t('ui.aiFlagTooltip'), { delay: 0 }); } catch (_) {}
+        }
+        titleEl.appendChild(document.createTextNode(String(articleTitle || '')));
       });
     } catch (_) {}
     
@@ -1529,16 +1648,37 @@ function displayIndex(parsed) {
       const minutes = computeReadTime(md, 200);
       const metaEl = el.querySelector('.card-meta');
       if (metaEl) {
+        const items = [];
         const dateEl = metaEl.querySelector('.card-date');
-        const readHtml = `<span class=\"card-read\">${minutes} ${t('ui.minRead')}</span>`;
+        if (dateEl && dateEl.textContent.trim()) items.push(dateEl.cloneNode(true));
+        const read = document.createElement('span');
+        read.className = 'card-read';
+        read.textContent = `${minutes} ${t('ui.minRead')}`;
+        items.push(read);
         const verCount = (meta && Array.isArray(meta.versions)) ? meta.versions.length : 0;
-        const versionsHtml = verCount > 1 ? `<span class=\"card-versions\" title=\"${t('ui.versionLabel')}\">${t('ui.versionsCount', verCount)}</span>` : '';
-        const parts = [];
-        if (dateEl && dateEl.textContent.trim()) parts.push(dateEl.outerHTML);
-        parts.push(readHtml);
-        if (versionsHtml) parts.push(versionsHtml);
-        if (meta && meta.draft) parts.push(`<span class=\"card-draft\">${t('ui.draftBadge')}</span>`);
-        metaEl.innerHTML = parts.join('<span class=\"card-sep\">•</span>');
+        if (verCount > 1) {
+          const v = document.createElement('span');
+          v.className = 'card-versions';
+          v.setAttribute('title', t('ui.versionLabel'));
+          v.textContent = t('ui.versionsCount', verCount);
+          items.push(v);
+        }
+        if (meta && meta.draft) {
+          const d = document.createElement('span');
+          d.className = 'card-draft';
+          d.textContent = t('ui.draftBadge');
+          items.push(d);
+        }
+        metaEl.textContent = '';
+        items.forEach((node, idx) => {
+          if (idx > 0) {
+            const sep = document.createElement('span');
+            sep.className = 'card-sep';
+            sep.textContent = '•';
+            metaEl.appendChild(sep);
+          }
+          metaEl.appendChild(node);
+        });
       }
   // Recompute masonry span for the updated card
   const container = document.querySelector('.index');
@@ -1667,16 +1807,37 @@ function displaySearch(query) {
       const minutes = computeReadTime(md, 200);
       const metaEl = el.querySelector('.card-meta');
       if (metaEl) {
+        const items = [];
         const dateEl = metaEl.querySelector('.card-date');
-        const readHtml = `<span class=\"card-read\">${minutes} ${t('ui.minRead')}</span>`;
+        if (dateEl && dateEl.textContent.trim()) items.push(dateEl.cloneNode(true));
+        const read = document.createElement('span');
+        read.className = 'card-read';
+        read.textContent = `${minutes} ${t('ui.minRead')}`;
+        items.push(read);
         const verCount = (meta && Array.isArray(meta.versions)) ? meta.versions.length : 0;
-        const versionsHtml = verCount > 1 ? `<span class=\"card-versions\" title=\"${t('ui.versionLabel')}\">${t('ui.versionsCount', verCount)}</span>` : '';
-        const parts = [];
-        if (dateEl && dateEl.textContent.trim()) parts.push(dateEl.outerHTML);
-        parts.push(readHtml);
-        if (versionsHtml) parts.push(versionsHtml);
-        if (meta && meta.draft) parts.push(`<span class=\"card-draft\">${t('ui.draftBadge')}</span>`);
-        metaEl.innerHTML = parts.join('<span class=\"card-sep\">•</span>');
+        if (verCount > 1) {
+          const v = document.createElement('span');
+          v.className = 'card-versions';
+          v.setAttribute('title', t('ui.versionLabel'));
+          v.textContent = t('ui.versionsCount', verCount);
+          items.push(v);
+        }
+        if (meta && meta.draft) {
+          const d = document.createElement('span');
+          d.className = 'card-draft';
+          d.textContent = t('ui.draftBadge');
+          items.push(d);
+        }
+        metaEl.textContent = '';
+        items.forEach((node, idx) => {
+          if (idx > 0) {
+            const sep = document.createElement('span');
+            sep.className = 'card-sep';
+            sep.textContent = '•';
+            metaEl.appendChild(sep);
+          }
+          metaEl.appendChild(node);
+        });
       }
   const container = document.querySelector('.index');
   if (container && el) updateMasonryItem(container, el);

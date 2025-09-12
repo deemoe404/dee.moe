@@ -1,5 +1,7 @@
 # yaml-language-server: $schema=../assets/schema/index.json
 
+shanghai2025:
+  zh: post/shanghai2025/main.md
 nanosite:
   zh: post/nanosite.md
 headless:

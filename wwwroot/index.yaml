@@ -1,7 +1,5 @@
 # yaml-language-server: $schema=../assets/schema/index.json
 
-testsingle:
-  en: post/testsingle/main_en.md
 test:
   en: post/test/main_en.md
   zh: post/test/main_zh.md

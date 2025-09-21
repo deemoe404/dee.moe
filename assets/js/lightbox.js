@@ -12,17 +12,46 @@ export function installLightbox(opts = {}) {
     overlay.id = 'ns-lightbox';
     overlay.setAttribute('aria-hidden', 'true');
     overlay.setAttribute('role', 'dialog');
-    overlay.innerHTML = `
-      <button class="ns-lb-close" aria-label="Close">×</button>
-      <button class="ns-lb-reset" aria-label="Reset zoom">⤾</button>
-      <div class="ns-lb-stage">
-        <img class="ns-lb-img" alt="">
-        <div class="ns-lb-caption" aria-live="polite"></div>
-      </div>
-      <div class="ns-lb-zoom" aria-hidden="true"></div>
-      <button class="ns-lb-prev" aria-label="Previous">‹</button>
-      <button class="ns-lb-next" aria-label="Next">›</button>
-    `;
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'ns-lb-close';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.textContent = '×';
+
+    const resetBtn = document.createElement('button');
+    resetBtn.className = 'ns-lb-reset';
+    resetBtn.setAttribute('aria-label', 'Reset zoom');
+    resetBtn.textContent = '⤾';
+
+    const stageDiv = document.createElement('div');
+    stageDiv.className = 'ns-lb-stage';
+
+    const imgNode = document.createElement('img');
+    imgNode.className = 'ns-lb-img';
+    imgNode.alt = '';
+
+    const captionDiv = document.createElement('div');
+    captionDiv.className = 'ns-lb-caption';
+    captionDiv.setAttribute('aria-live', 'polite');
+
+    stageDiv.appendChild(imgNode);
+    stageDiv.appendChild(captionDiv);
+
+    const zoomDiv = document.createElement('div');
+    zoomDiv.className = 'ns-lb-zoom';
+    zoomDiv.setAttribute('aria-hidden', 'true');
+
+    const prevBtn = document.createElement('button');
+    prevBtn.className = 'ns-lb-prev';
+    prevBtn.setAttribute('aria-label', 'Previous');
+    prevBtn.textContent = '‹';
+
+    const nextBtn = document.createElement('button');
+    nextBtn.className = 'ns-lb-next';
+    nextBtn.setAttribute('aria-label', 'Next');
+    nextBtn.textContent = '›';
+
+    overlay.append(closeBtn, resetBtn, stageDiv, zoomDiv, prevBtn, nextBtn);
     document.body.appendChild(overlay);
   }
 
@@ -162,16 +191,45 @@ export function installLightbox(opts = {}) {
     return all;
   }
 
+  function sanitizeImageSrc(raw) {
+    try {
+      const s = (raw || '').trim();
+      if (!s) return '';
+      // Permit only http, https, blob, and data:image/* (raster only) URLs
+      const u = new URL(s, document.baseURI);
+      const p = u.protocol;
+      if (p === 'http:' || p === 'https:' || p === 'blob:') return u.href;
+      if (p === 'data:') {
+        // Strict allowlist for data:image/* URIs; explicitly disallow SVG
+        // Format: data:image/<type>[;base64],...
+        const body = s.slice(5); // after 'data:'
+        const m = body.match(/^image\/([A-Za-z0-9.+-]+)[;,]/);
+        if (!m) return '';
+        const type = (m[1] || '').toLowerCase();
+        // Allow only common raster formats
+        const allowed = new Set(['png', 'jpeg', 'jpg', 'gif', 'webp', 'avif', 'bmp', 'x-icon']);
+        if (allowed.has(type)) return s;
+        return '';
+      }
+      return '';
+    } catch (_) {
+      return '';
+    }
+  }
+
   function resolveSrc(el) {
     if (!el) return '';
-    return el.getAttribute('src') || el.getAttribute('data-src') || '';
+    // Use resolved URL properties only (avoid raw attribute text)
+    // This prevents DOM text from being reinterpreted as markup/HTML.
+    const raw = el.currentSrc || el.src || '';
+    return sanitizeImageSrc(raw);
   }
 
   function openAt(index) {
     if (!currentList.length) return;
     currentIndex = Math.max(0, Math.min(index, currentList.length - 1));
     const src = resolveSrc(currentList[currentIndex]);
-    const alt = currentList[currentIndex].getAttribute('alt') || '';
+    const alt = currentList[currentIndex].alt || '';
     if (src) {
       const ensureFit = () => { computeBaseFit(); applyTransform(); };
       if (imgEl.complete && imgEl.naturalWidth > 0) { imgEl.src = src; ensureFit(); }

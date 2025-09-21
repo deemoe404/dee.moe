@@ -39,9 +39,18 @@ themeMode: user
 themePack: native
 themeOverride: true
 
+# Repository information used for internal linking of "report issue" etc.
+repo:
+  owner: deemoe404
+  name: dee.moe
+  branch: main
+
 # Maintenance configurations
 reportIssueURL: https://github.com/deemoe404/dee.moe/issues/new
 assetWarnings:
   largeImage:
     enabled: true
     thresholdKB: 500
+
+# landingTab: About  # Set to a tab slug or title defined in tabs.yaml
+# showAllPosts: true # Set to false to hide the All Posts tab/index

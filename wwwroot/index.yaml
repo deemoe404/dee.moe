@@ -1,9 +1,5 @@
 # yaml-language-server: $schema=../assets/schema/index.json
 
-test:
-  en: post/test/main_en.md
-  zh: post/test/main_zh.md
-  ja: post/test/main_ja.md
 shanghai2025:
   zh: post/shanghai2025/main.md
 nanosite:
@@ -20,3 +16,5 @@ win11_forgy:
   zh: post/win11_forgy.md
 frogy:
   en: post/frogy/main.md
+test:
+  en: post/test/main_en.md

@@ -3,7 +3,7 @@ title: this is a test artical
 date: 2025-09-21
 tags: test
 excerpt: test
-author: me
+author: meandu
 ai: false
 draft: true
 ---

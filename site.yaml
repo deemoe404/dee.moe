@@ -15,24 +15,13 @@ siteKeywords: "static blog, markdown, github pages, blog"
 
 avatar: assets/avatar.jpeg
 
-profileLinks:
-  -
-    label: GitHub
-    href: "https://github.com/deemoe404"
-  -
-    label: ORCID
-    href: "https://orcid.org/0009-0005-4213-5418"
-  -
-    label: E-Mail
-    href: "mailto:deemoe404@gmail.com"
-
 resourceURL: "https://dee.moe/wwwroot/"
 
 contentRoot: wwwroot
 
 contentOutdatedDays: 180
 
-cardCoverFallback: false
+cardCoverFallback: true
 
 errorOverlay: true
 

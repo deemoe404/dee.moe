@@ -21,7 +21,7 @@ contentRoot: wwwroot
 
 contentOutdatedDays: 180
 
-cardCoverFallback: true
+cardCoverFallback: false
 
 errorOverlay: true
 

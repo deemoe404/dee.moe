@@ -1,5 +1,8 @@
 # yaml-language-server: $schema=../assets/schema/index.json
 
+tXt_1:
+  en: post/tXt_1/main_en.md
+  ja: ""
 shanghai2025:
   zh: post/shanghai2025/main.md
 nanosite:

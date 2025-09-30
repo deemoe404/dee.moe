@@ -33,7 +33,7 @@ themeMode: user
 
 themePack: native
 
-themeOverride: true
+themeOverride: false
 
 showAllPosts: true
 

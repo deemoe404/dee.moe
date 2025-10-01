@@ -1,6 +1,7 @@
 import { fetchConfigWithYamlFallback, parseYAML } from './yaml.js';
 import { t, getAvailableLangs, getLanguageLabel } from './i18n.js';
 import { generateSitemapData, resolveSiteBaseUrl } from './seo.js';
+import { parseFrontMatter } from './content.js';
 import { initSystemUpdates, getSystemUpdateSummaryEntries, getSystemUpdateCommitFiles, clearSystemUpdateState } from './system-updates.js';
 
 // Utility helpers
@@ -90,6 +91,10 @@ const MARKDOWN_DRAFT_STORAGE_KEY = 'ns_markdown_editor_drafts_v1';
 
 // Track pending binary assets associated with markdown drafts
 const markdownAssetStore = new Map();
+
+// Shared caches for metadata hydration
+const composerFrontMatterCache = new Map();
+const indexFrontMatterHydrationTimers = new Map();
 
 const MARKDOWN_PUSH_LABEL_KEYS = {
   default: 'editor.composer.markdown.push.labelDefault',
@@ -1883,6 +1888,366 @@ function normalizeIndexEntry(entry) {
   return out;
 }
 
+function normalizeContentPath(path) {
+  const raw = safeString(path).trim();
+  if (!raw) return '';
+  return raw.replace(/\\+/g, '/').replace(/^\/+/, '');
+}
+
+function resolveFrontMatterImage(value, location) {
+  const raw = safeString(value).trim();
+  if (!raw) return '';
+  if (/^(https?:|data:)/i.test(raw) || raw.startsWith('/')) return raw;
+  const normalizedLoc = normalizeContentPath(location);
+  const lastSlash = normalizedLoc.lastIndexOf('/');
+  const baseDir = lastSlash >= 0 ? normalizedLoc.slice(0, lastSlash + 1) : '';
+  return `${baseDir}${raw}`.replace(/\\+/g, '/');
+}
+
+function normalizeTagList(value) {
+  if (value == null) return null;
+  if (Array.isArray(value)) {
+    const normalized = value
+      .map(item => safeString(item).trim())
+      .filter(Boolean);
+    return normalized.length ? normalized : null;
+  }
+  const str = safeString(value).trim();
+  if (!str) return null;
+  if (str.includes(',')) {
+    const parts = str.split(',').map(part => part.trim()).filter(Boolean);
+    if (parts.length > 1) return parts;
+  }
+  return str;
+}
+
+function frontMatterBoolean(value) {
+  if (value === true) return true;
+  if (value === false) return false;
+  if (value == null) return null;
+  const normalized = safeString(value).trim().toLowerCase();
+  if (!normalized) return null;
+  if (['true', '1', 'yes', 'y', 'on', 'enabled'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'n', 'off', 'disabled'].includes(normalized)) return false;
+  return null;
+}
+
+function hasMetaValue(value) {
+  if (value == null) return false;
+  if (typeof value === 'boolean') return true;
+  if (Array.isArray(value)) {
+    return value.some(item => hasMetaValue(item));
+  }
+  return safeString(value).trim() !== '';
+}
+
+function applyMetaField(target, key, value) {
+  if (!target || !hasMetaValue(value)) return false;
+  if (hasMetaValue(target[key])) return false;
+  if (Array.isArray(value)) {
+    const normalized = value.map(item => safeString(item).trim()).filter(Boolean);
+    if (!normalized.length) return false;
+    target[key] = normalized;
+    return true;
+  }
+  if (typeof value === 'boolean') {
+    target[key] = value;
+    return true;
+  }
+  const str = safeString(value).trim();
+  if (!str) return false;
+  target[key] = str;
+  return true;
+}
+
+function hasVariantMeta(meta) {
+  if (!meta || typeof meta !== 'object') return false;
+  return Object.keys(meta).some((key) => {
+    if (key === 'location' || key === 'path') return false;
+    return hasMetaValue(meta[key]);
+  });
+}
+
+function pruneVariantMeta(meta) {
+  if (!meta || typeof meta !== 'object') return null;
+  const location = normalizeContentPath(meta.location || meta.path || '');
+  if (!location) return null;
+  const out = { location };
+  const fields = ['title', 'date', 'excerpt', 'image', 'tag', 'versionLabel', 'version', 'ai', 'draft'];
+  fields.forEach((field) => {
+    if (!Object.prototype.hasOwnProperty.call(meta, field)) return;
+    const value = meta[field];
+    if (!hasMetaValue(value)) return;
+    if (Array.isArray(value)) out[field] = value.map(item => safeString(item).trim()).filter(Boolean);
+    else if (typeof value === 'boolean') out[field] = value;
+    else out[field] = safeString(value).trim();
+  });
+  return Object.keys(out).length > 1 ? out : null;
+}
+
+function pruneMeta(meta) {
+  if (!meta || typeof meta !== 'object') return {};
+  const out = {};
+  const generalFields = ['title', 'date', 'excerpt', 'image', 'tag', 'versionLabel', 'version', 'ai', 'draft'];
+  generalFields.forEach((field) => {
+    if (!Object.prototype.hasOwnProperty.call(meta, field)) return;
+    const value = meta[field];
+    if (!hasMetaValue(value)) return;
+    if (Array.isArray(value)) out[field] = value.map(item => safeString(item).trim()).filter(Boolean);
+    else if (typeof value === 'boolean') out[field] = value;
+    else out[field] = safeString(value).trim();
+  });
+  const versions = Array.isArray(meta.__versions)
+    ? meta.__versions.map(pruneVariantMeta).filter(Boolean)
+    : [];
+  if (versions.length) out.__versions = versions;
+  return out;
+}
+
+function extractFrontMatterMeta(frontMatter, location) {
+  const meta = { location: normalizeContentPath(location) };
+  if (!frontMatter || typeof frontMatter !== 'object') return meta;
+
+  const title = safeString(frontMatter.title || frontMatter.name || '').trim();
+  if (title) meta.title = title;
+
+  const date = safeString(frontMatter.date || frontMatter.published || frontMatter.publishedAt || '').trim();
+  if (date) meta.date = date;
+
+  const excerptRaw = frontMatter.excerpt ?? frontMatter.summary ?? frontMatter.description ?? null;
+  const excerpt = safeString(excerptRaw || '').trim();
+  if (excerpt) meta.excerpt = excerpt;
+
+  const image = resolveFrontMatterImage(frontMatter.image ?? frontMatter.cover ?? frontMatter.thumbnail ?? frontMatter.hero, location);
+  if (image) meta.image = image;
+
+  const tags = normalizeTagList(frontMatter.tags ?? frontMatter.tag ?? frontMatter.categories ?? frontMatter.category);
+  if (hasMetaValue(tags)) meta.tag = tags;
+
+  const rawVersionLabel = frontMatter.versionLabel ?? frontMatter.versionName ?? frontMatter.releaseLabel ?? frontMatter.release ?? null;
+  const rawVersion = frontMatter.version ?? null;
+  const versionLabel = safeString(rawVersionLabel || rawVersion || '').trim();
+  if (versionLabel) meta.versionLabel = versionLabel;
+
+  const versionId = frontMatter.versionId
+    ?? frontMatter.versionCode
+    ?? frontMatter.versionNumber
+    ?? frontMatter.build
+    ?? frontMatter.buildNumber
+    ?? null;
+  const version = safeString(versionId || '').trim();
+  if (version) meta.version = version;
+  else if (!version && rawVersion && typeof rawVersion !== 'object') {
+    const numeric = safeString(rawVersion).trim();
+    if (numeric && /^\d+(?:[.-]\d+)*$/.test(numeric)) meta.version = numeric;
+  }
+
+  const ai = frontMatterBoolean(frontMatter.ai ?? frontMatter.aiGenerated ?? frontMatter.generated ?? frontMatter.llm);
+  if (ai !== null) meta.ai = ai;
+
+  const draft = frontMatterBoolean(frontMatter.draft ?? frontMatter.wip ?? frontMatter.unfinished ?? frontMatter.inprogress ?? frontMatter.private ?? frontMatter.unpublished);
+  if (draft !== null) meta.draft = draft;
+
+  return meta;
+}
+
+async function hydrateIndexMetadataFromFrontMatter(index, options = {}) {
+  if (!index || typeof index !== 'object') return;
+  const contentRoot = safeString(options.contentRoot || 'wwwroot').replace(/\\+/g, '/').replace(/\/+$/, '');
+  const rootPrefix = contentRoot ? `${contentRoot}/` : '';
+  const sharedCache = options && options.frontMatterCache instanceof Map ? options.frontMatterCache : null;
+  const frontMatterCache = sharedCache || new Map();
+  const forceRefresh = options && options.forceRefresh === true;
+  const FRONT_MATTER_CACHE_TTL = 30_000;
+
+  const fetchFrontMatterForPath = async (path) => {
+    const normalized = normalizeContentPath(path);
+    if (!normalized) return null;
+
+    if (forceRefresh) {
+      frontMatterCache.delete(normalized);
+    }
+
+    const now = Date.now();
+    const cached = frontMatterCache.get(normalized);
+    if (cached) {
+      if (typeof cached === 'object' && cached && Object.prototype.hasOwnProperty.call(cached, 'promise')) {
+        if (!cached.expiry || cached.expiry > now) {
+          return cached.promise;
+        }
+        frontMatterCache.delete(normalized);
+      } else if (typeof cached.then === 'function') {
+        return cached;
+      }
+    }
+
+    const record = { promise: null, expiry: 0 };
+    const promise = (async () => {
+      try {
+        const response = await fetch(`${rootPrefix}${normalized}`, { cache: 'no-store' });
+        if (!response || !response.ok) return null;
+        const text = await response.text();
+        const { frontMatter } = parseFrontMatter(text);
+        return frontMatter && typeof frontMatter === 'object' ? frontMatter : {};
+      } catch (error) {
+        console.warn('Composer: failed to read front matter for', normalized, error);
+        return null;
+      }
+    })();
+
+    record.promise = promise
+      .then((result) => {
+        const hasMeta = result && typeof result === 'object' && Object.keys(result).length > 0;
+        if (hasMeta) {
+          record.expiry = Date.now() + FRONT_MATTER_CACHE_TTL;
+          frontMatterCache.set(normalized, record);
+        } else {
+          frontMatterCache.delete(normalized);
+        }
+        return result;
+      })
+      .catch((error) => {
+        frontMatterCache.delete(normalized);
+        throw error;
+      });
+
+    frontMatterCache.set(normalized, record);
+    return record.promise;
+  };
+
+  const keys = Array.isArray(index.__order) ? index.__order.slice() : Object.keys(index).filter(k => k !== '__order');
+  for (const key of keys) {
+    const entry = index[key];
+    if (!entry || typeof entry !== 'object') continue;
+    const existingMetaMap = (entry.__meta && typeof entry.__meta === 'object') ? entry.__meta : {};
+    const nextMetaMap = {};
+    const langSet = new Set();
+    Object.keys(existingMetaMap).forEach(lang => langSet.add(lang));
+    Object.keys(entry).forEach((lang) => {
+      if (lang === '__meta' || lang === '__order') return;
+      langSet.add(lang);
+    });
+
+    for (const lang of langSet) {
+      if (lang === '__meta' || lang === '__order') continue;
+      const rawValue = entry[lang];
+      const existingMeta = (existingMetaMap[lang] && typeof existingMetaMap[lang] === 'object')
+        ? deepClone(existingMetaMap[lang])
+        : {};
+      const versionMap = new Map();
+      if (existingMeta.__versions && Array.isArray(existingMeta.__versions)) {
+        existingMeta.__versions.forEach((item) => {
+          if (!item || typeof item !== 'object') return;
+          const locKey = normalizeContentPath(item.location || item.path || '');
+          if (!locKey) return;
+          const clone = deepClone(item);
+          if (!clone.location) clone.location = locKey;
+          versionMap.set(locKey, clone);
+        });
+      }
+      delete existingMeta.__versions;
+
+      if (rawValue == null) {
+        const prunedMeta = pruneMeta(existingMeta);
+        if (Object.keys(prunedMeta).length) nextMetaMap[lang] = prunedMeta;
+        continue;
+      }
+
+      const valueList = Array.isArray(rawValue) ? rawValue : [rawValue];
+      const paths = Array.from(new Set(valueList.map(item => normalizeContentPath(item)).filter(Boolean)));
+      if (!paths.length) {
+        const prunedMeta = pruneMeta(existingMeta);
+        if (Object.keys(prunedMeta).length) nextMetaMap[lang] = prunedMeta;
+        continue;
+      }
+
+      const results = await Promise.all(paths.map(async (p) => {
+        const fm = await fetchFrontMatterForPath(p);
+        return { path: p, frontMatter: fm };
+      }));
+
+      results.forEach(({ path, frontMatter }) => {
+        if (!frontMatter || typeof frontMatter !== 'object') return;
+        const fmMeta = extractFrontMatterMeta(frontMatter, path);
+        const general = { ...fmMeta };
+        delete general.location;
+        Object.keys(general).forEach((field) => {
+          applyMetaField(existingMeta, field, general[field]);
+        });
+        if (hasVariantMeta(fmMeta)) {
+          const variant = versionMap.get(path) || { location: path };
+          Object.keys(general).forEach((field) => {
+            applyMetaField(variant, field, general[field]);
+          });
+          if (!variant.location) variant.location = path;
+          versionMap.set(path, variant);
+        }
+      });
+
+      const versions = Array.from(versionMap.values()).map(pruneVariantMeta).filter(Boolean);
+      if (versions.length) existingMeta.__versions = versions;
+      const prunedMeta = pruneMeta(existingMeta);
+      if (Object.keys(prunedMeta).length) nextMetaMap[lang] = prunedMeta;
+    }
+
+    if (Object.keys(nextMetaMap).length) entry.__meta = nextMetaMap;
+    else if (entry.__meta) delete entry.__meta;
+  }
+}
+
+function cancelScheduledIndexEntryFrontMatterHydration(key) {
+  if (!key) return;
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKey) return;
+  const timer = indexFrontMatterHydrationTimers.get(normalizedKey);
+  if (timer != null) {
+    try { clearTimeout(timer); } catch (_) {}
+    indexFrontMatterHydrationTimers.delete(normalizedKey);
+  }
+}
+
+function scheduleIndexEntryFrontMatterHydration(key, options = {}) {
+  if (!key) return;
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKey) return;
+  const state = activeComposerState;
+  if (!state || !state.index || !state.index[normalizedKey]) return;
+  const delay = Number.isFinite(options.delay) ? Math.max(0, options.delay) : 480;
+  const existing = indexFrontMatterHydrationTimers.get(normalizedKey);
+  if (existing != null) {
+    try { clearTimeout(existing); } catch (_) {}
+    indexFrontMatterHydrationTimers.delete(normalizedKey);
+  }
+
+  const run = async () => {
+    indexFrontMatterHydrationTimers.delete(normalizedKey);
+    const currentState = activeComposerState;
+    if (!currentState || !currentState.index) return;
+    const entry = currentState.index[normalizedKey];
+    if (!entry || typeof entry !== 'object') return;
+    const subset = { __order: [normalizedKey] };
+    subset[normalizedKey] = entry;
+    try {
+      await hydrateIndexMetadataFromFrontMatter(subset, {
+        contentRoot: getContentRootSafe(),
+        frontMatterCache: composerFrontMatterCache,
+        forceRefresh: true
+      });
+      notifyComposerChange('index');
+    } catch (error) {
+      console.warn('Composer: failed to hydrate metadata for entry', normalizedKey, error);
+    }
+  };
+
+  if (delay <= 0) {
+    run();
+    return;
+  }
+
+  const timer = setTimeout(run, delay);
+  indexFrontMatterHydrationTimers.set(normalizedKey, timer);
+}
+
 function prepareTabsState(raw) {
   const output = { __order: [] };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return output;
@@ -2665,6 +3030,31 @@ function readDraftStore() {
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch (_) {
     return {};
+  }
+}
+
+function flushScheduledIndexFrontMatterHydrations() {
+  const timers = Array.from(indexFrontMatterHydrationTimers.values());
+  indexFrontMatterHydrationTimers.clear();
+  timers.forEach((timer) => {
+    if (timer != null) {
+      try { clearTimeout(timer); }
+      catch (_) {}
+    }
+  });
+}
+
+async function ensureIndexMetadataForExport(state) {
+  if (!state || typeof state !== 'object') return;
+  flushScheduledIndexFrontMatterHydrations();
+  try {
+    await hydrateIndexMetadataFromFrontMatter(state, {
+      contentRoot: getContentRootSafe(),
+      frontMatterCache: composerFrontMatterCache,
+      forceRefresh: true
+    });
+  } catch (error) {
+    console.warn('Composer: failed to hydrate metadata before export', error);
   }
 }
 
@@ -4843,7 +5233,7 @@ async function generateSeoCommitFiles() {
 
 async function gatherCommitPayload(options = {}) {
   const { showSeoStatus = false } = options;
-  const base = gatherLocalChangesForCommit(options);
+  const base = await gatherLocalChangesForCommit(options);
   const files = Array.isArray(base.files) ? base.files.slice() : [];
   if (showSeoStatus) {
     try {
@@ -4857,7 +5247,7 @@ async function gatherCommitPayload(options = {}) {
   return { files, seoFiles };
 }
 
-function gatherLocalChangesForCommit(options = {}) {
+async function gatherLocalChangesForCommit(options = {}) {
   const { cleanupUnusedAssets = true } = options;
   const files = [];
   const seenPaths = new Set();
@@ -4887,6 +5277,7 @@ function gatherLocalChangesForCommit(options = {}) {
 
   if (composerDiffCache.index && composerDiffCache.index.hasChanges) {
     const state = getStateSlice('index') || { __order: [] };
+    await ensureIndexMetadataForExport(state);
     const yaml = toIndexYaml(state);
     addFile({ kind: 'index', label: 'index.yaml', path: `${rootPrefix}index.yaml`, content: yaml });
   }
@@ -10470,6 +10861,7 @@ function buildIndexUI(root, state) {
               if (prevPath && prevPath !== nextPath) updateComposerMarkdownDraftIndicators({ path: prevPath });
               if (nextPath) updateComposerMarkdownDraftIndicators({ path: nextPath });
               markDirty();
+              scheduleIndexEntryFrontMatterHydration(key);
             });
             $('.ci-edit', row).addEventListener('click', () => {
               const rel = normalizeRelPath(arr[i]);
@@ -10507,6 +10899,7 @@ function buildIndexUI(root, state) {
               syncVersionMeta();
               renderVers(prev);
               markDirty();
+              scheduleIndexEntryFrontMatterHydration(key);
             });
             verList.appendChild(row);
           });
@@ -10621,6 +11014,7 @@ function buildIndexUI(root, state) {
     btnDel.addEventListener('click', () => {
       const i = state.index.__order.indexOf(key);
       if (i >= 0) state.index.__order.splice(i, 1);
+      cancelScheduledIndexEntryFrontMatterHydration(key);
       delete state.index[key];
       row.remove();
       markDirty();
@@ -10987,6 +11381,7 @@ async function addComposerEntry(kind, anchor) {
       const defaultPath = buildDefaultEntryPath('index', key, lang);
       slice[key][lang] = [defaultPath];
     }
+    scheduleIndexEntryFrontMatterHydration(key, { delay: 0 });
   }
 
   slice.__order.unshift(key);
@@ -11330,7 +11725,12 @@ function bindComposerUI(state) {
           const normalizedTarget = normalizeTarget(targetKind) || (getActiveComposerFile() === 'tabs' ? 'tabs' : 'index');
           // Also copy YAML snapshot here to leverage the user gesture
           try {
-            const text = normalizedTarget === 'tabs' ? toTabsYaml(state.tabs || {}) : toIndexYaml(state.index || {});
+            let text;
+            if (normalizedTarget === 'tabs') text = toTabsYaml(state.tabs || {});
+            else {
+              await ensureIndexMetadataForExport(state.index || {});
+              text = toIndexYaml(state.index || {});
+            }
             nsCopyToClipboard(text);
           } catch(_) {}
           const now = await computeMissingFiles(normalizedTarget);
@@ -11349,7 +11749,12 @@ function bindComposerUI(state) {
       const contentRoot = (window.__ns_content_root || 'wwwroot').replace(/\\+/g,'/').replace(/\/?$/, '');
       const fallback = getActiveComposerFile();
       const target = normalizeTarget(targetKind) || (fallback === 'tabs' ? 'tabs' : 'index');
-      const desired = target === 'tabs' ? toTabsYaml(state.tabs || {}) : toIndexYaml(state.index || {});
+      let desired;
+      if (target === 'tabs') desired = toTabsYaml(state.tabs || {});
+      else {
+        await ensureIndexMetadataForExport(state.index || {});
+        desired = toIndexYaml(state.index || {});
+      }
       async function fetchText(url){ try { const r = await fetch(url, { cache: 'no-store' }); if (r && r.ok) return await r.text(); } catch(_){} return ''; }
       const baseName = target === 'tabs' ? 'tabs' : 'index';
       const url1 = `${contentRoot}/${baseName}.yaml`; const url2 = `${contentRoot}/${baseName}.yml`;
@@ -11428,7 +11833,12 @@ function bindComposerUI(state) {
         const target = targetKind === 'tabs' ? 'tabs' : 'index';
         // Copy YAML snapshot up-front to retain user-activation for clipboard
         try {
-          const text = target === 'tabs' ? toTabsYaml(state.tabs || {}) : toIndexYaml(state.index || {});
+          let text;
+          if (target === 'tabs') text = toTabsYaml(state.tabs || {});
+          else {
+            await ensureIndexMetadataForExport(state.index || {});
+            text = toIndexYaml(state.index || {});
+          }
           nsCopyToClipboard(text);
         } catch(_) {}
         const missing = await computeMissingFiles(target);
@@ -11534,6 +11944,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       fetchConfigWithYamlFallback([`${root}/tabs.yaml`, `${root}/tabs.yml`])
     ]);
     const remoteIndex = prepareIndexState(idx || {});
+    await hydrateIndexMetadataFromFrontMatter(remoteIndex, { contentRoot: root, frontMatterCache: composerFrontMatterCache });
     const remoteTabs = prepareTabsState(tbs || {});
     remoteBaseline.index = deepClone(remoteIndex);
     remoteBaseline.tabs = deepClone(remoteTabs);

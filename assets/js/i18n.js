@@ -32,162 +32,83 @@ const translations = {};
 const languageNames = {};
 let languageManifest = [];
 let manifestLoadPromise = null;
-const languageModuleUrls = new Map();
-const bundleLoadPromises = new Map();
-let manifestBaseUrl = null;
-
-// Limit for concurrent front matter fetches when resolving simplified content entries.
-// Set to a positive integer to chunk requests; falsy values disable the limit.
-const FRONTMATTER_FETCH_BATCH_SIZE = 6;
-
-const EMBEDDED_METADATA_FIELDS = new Set([
-  'title', 'titles', 'date', 'excerpt', 'summary', 'image', 'cover', 'thumb',
-  'tag', 'tags', 'version', 'versionlabel', 'ai', 'aigenerated', 'llm',
-  'draft', 'wip', 'unfinished', 'inprogress'
-]);
 
 const FALLBACK_LANGUAGE_LABEL = (enLanguageMeta && enLanguageMeta.label) ? enLanguageMeta.label : 'English';
 translations[DEFAULT_LANG] = enTranslations;
 languageNames[DEFAULT_LANG] = FALLBACK_LANGUAGE_LABEL;
 languageManifest = [{ value: DEFAULT_LANG, label: FALLBACK_LANGUAGE_LABEL }];
 
-function emitBundleLoaded(lang) {
-  if (typeof window === 'undefined') return;
-  try {
-    window.dispatchEvent(new CustomEvent('ns:i18n-bundle-loaded', { detail: { lang } }));
-  } catch (_) { /* ignore */ }
-}
-
-function upsertManifestEntry(value, label, { preferFront = false } = {}) {
-  if (!value) return;
-  const normalized = String(value).toLowerCase();
-  const display = label || languageNames[normalized] || normalized;
-  const idx = languageManifest.findIndex((item) => item && item.value === normalized);
-  if (idx >= 0) {
-    const existing = languageManifest[idx];
-    if (!existing || existing.label !== display) {
-      languageManifest[idx] = { value: normalized, label: display };
-    }
-  } else if (preferFront) {
-    languageManifest.unshift({ value: normalized, label: display });
-  } else {
-    languageManifest.push({ value: normalized, label: display });
-  }
-}
-
-async function loadLanguageBundle(langCode) {
-  const code = String(langCode || '').toLowerCase();
-  if (!code) return null;
-  if (translations[code]) return translations[code];
-  if (bundleLoadPromises.has(code)) return bundleLoadPromises.get(code);
-  if (manifestLoadPromise) await manifestLoadPromise;
-  const moduleHref = languageModuleUrls.get(code);
-  if (!moduleHref) {
-    if (code === DEFAULT_LANG) return translations[DEFAULT_LANG] || null;
-    // Attempt implicit fallback to ./<code>.js relative to manifest when not registered
-    if (manifestBaseUrl) {
-      try {
-        const implicitUrl = new URL(`./${code}.js`, manifestBaseUrl);
-        languageModuleUrls.set(code, implicitUrl.href);
-        return loadLanguageBundle(code);
-      } catch (_) {
-        // ignore
-      }
-    }
-    return null;
-  }
-  const loader = (async () => {
+async function ensureLanguageBundlesLoaded() {
+  if (manifestLoadPromise) return manifestLoadPromise;
+  manifestLoadPromise = (async () => {
+    const manifestUrl = new URL('../i18n/languages.json', import.meta.url);
+    let manifest = [];
     try {
-      const mod = await import(moduleHref);
-      const bundle = (mod && typeof mod.default === 'object') ? mod.default : (mod && typeof mod.translations === 'object' ? mod.translations : null);
-      if (!bundle) {
-        console.warn(`[i18n] Language module ${moduleHref} did not export a translations object`);
-        return null;
+      const resp = await fetch(manifestUrl, { cache: 'no-store' });
+      if (resp && resp.ok) {
+        const data = await resp.json();
+        if (Array.isArray(data)) manifest = data;
       }
-      translations[code] = bundle;
-      const metaLabel = languageNames[code] || mod.languageLabel || (mod.languageMeta && mod.languageMeta.label);
-      if (metaLabel) languageNames[code] = metaLabel;
-      upsertManifestEntry(code, languageNames[code]);
-      emitBundleLoaded(code);
-      return bundle;
     } catch (err) {
-      console.warn("[i18n] Failed to load language bundle for %s", code, err);
-      return null;
+      console.warn('[i18n] Failed to load language manifest', err);
     }
-  })().finally(() => {
-    bundleLoadPromises.delete(code);
-  });
-  bundleLoadPromises.set(code, loader);
-  return loader;
-}
-
-async function ensureLanguageBundlesLoaded(langToEnsure) {
-  if (!manifestLoadPromise) {
-    manifestLoadPromise = (async () => {
-      const manifestUrl = new URL('../i18n/languages.json', import.meta.url);
-      manifestBaseUrl = manifestUrl;
-      let manifest = [];
+    if (!manifest.length) {
+      manifest = [{ value: DEFAULT_LANG, label: 'English', module: './en.js' }];
+    }
+    const seen = new Set();
+    const sanitized = [];
+    for (const entry of manifest) {
+      if (!entry) continue;
+      const value = String(entry.value || '').toLowerCase().trim();
+      if (!value || seen.has(value)) continue;
+      let moduleUrl;
+      const modulePath = entry.module || `./${value}.js`;
       try {
-        const resp = await fetch(manifestUrl, { cache: 'no-store' });
-        if (resp && resp.ok) {
-          const data = await resp.json();
-          if (Array.isArray(data)) manifest = data;
-        }
+        moduleUrl = new URL(modulePath, manifestUrl);
       } catch (err) {
-        console.warn('[i18n] Failed to load language manifest', err);
+        console.warn(`[i18n] Invalid module path for ${value}`, err);
+        continue;
       }
-      if (!manifest.length) {
-        manifest = [{ value: DEFAULT_LANG, label: 'English', module: './en.js' }];
-      }
-      const seen = new Set();
-      languageManifest = [];
-      for (const entry of manifest) {
-        if (!entry) continue;
-        const value = String(entry.value || '').toLowerCase().trim();
-        if (!value || seen.has(value)) continue;
-        const modulePath = entry.module || `./${value}.js`;
-        let moduleUrl = null;
-        try {
-          moduleUrl = new URL(modulePath, manifestUrl);
-        } catch (err) {
-          console.warn(`[i18n] Invalid module path for ${value}`, err);
+      try {
+        const mod = await import(moduleUrl.href);
+        const bundle = (mod && typeof mod.default === 'object') ? mod.default : (mod && typeof mod.translations === 'object' ? mod.translations : null);
+        if (!bundle) {
+          console.warn(`[i18n] Language module ${moduleUrl.href} did not export a translations object`);
           continue;
         }
-        languageModuleUrls.set(value, moduleUrl.href);
-        if (entry.label) languageNames[value] = entry.label;
-        upsertManifestEntry(value, entry.label || value);
+        translations[value] = bundle;
+        const metaLabel = entry.label || mod.languageLabel || (mod.languageMeta && mod.languageMeta.label);
+        if (metaLabel) languageNames[value] = metaLabel;
+        sanitized.push({ value, label: languageNames[value] || metaLabel || value });
         seen.add(value);
+      } catch (err) {
+        console.warn(`[i18n] Failed to load language bundle for ${value}`, err);
       }
-      if (!languageModuleUrls.has(DEFAULT_LANG)) {
-        try {
-          const fallbackUrl = new URL('./en.js', manifestUrl);
-          languageModuleUrls.set(DEFAULT_LANG, fallbackUrl.href);
-        } catch (err) {
-          console.warn('[i18n] Unable to register fallback English bundle', err);
+    }
+    if (!translations[DEFAULT_LANG]) {
+      try {
+        const fallbackUrl = new URL('./en.js', manifestUrl);
+        const mod = await import(fallbackUrl.href);
+        const bundle = (mod && typeof mod.default === 'object') ? mod.default : (mod && typeof mod.translations === 'object' ? mod.translations : null);
+        if (bundle) {
+          translations[DEFAULT_LANG] = bundle;
+          const label = mod.languageLabel || (mod.languageMeta && mod.languageMeta.label) || 'English';
+          languageNames[DEFAULT_LANG] = label;
+          if (!seen.has(DEFAULT_LANG)) {
+            sanitized.unshift({ value: DEFAULT_LANG, label });
+            seen.add(DEFAULT_LANG);
+          }
         }
+      } catch (err) {
+        console.error('[i18n] Unable to load fallback English bundle', err);
       }
-      if (!languageNames[DEFAULT_LANG]) languageNames[DEFAULT_LANG] = FALLBACK_LANGUAGE_LABEL;
-      upsertManifestEntry(DEFAULT_LANG, languageNames[DEFAULT_LANG] || FALLBACK_LANGUAGE_LABEL || DEFAULT_LANG, { preferFront: true });
-      languageManifest = languageManifest.reduce((acc, entry) => {
-        if (!entry || !entry.value) return acc;
-        if (acc.find((item) => item.value === entry.value)) return acc;
-        acc.push(entry);
-        return acc;
-      }, []);
+    }
+    if (!sanitized.length) {
+      sanitized.push({ value: DEFAULT_LANG, label: languageNames[DEFAULT_LANG] || FALLBACK_LANGUAGE_LABEL || DEFAULT_LANG });
+    }
+    languageManifest = sanitized;
   })();
-}
-  await manifestLoadPromise;
-
-  if (!translations[DEFAULT_LANG]) {
-    await loadLanguageBundle(DEFAULT_LANG);
-  }
-
-  const target = String(langToEnsure || currentLang || DEFAULT_LANG).toLowerCase();
-  if (target && !translations[target]) {
-    await loadLanguageBundle(target);
-  }
-
-  return translations[target] || translations[DEFAULT_LANG] || null;
+  return manifestLoadPromise;
 }
 
 
@@ -208,11 +129,10 @@ function detectLang() {
 }
 
 export async function initI18n(opts = {}) {
-  const desiredInput = (opts.lang || detectLang() || '').toLowerCase();
+  await ensureLanguageBundlesLoaded();
+  const desired = (opts.lang || detectLang() || '').toLowerCase();
   const def = (opts.defaultLang || DEFAULT_LANG).toLowerCase();
-  const desired = desiredInput || def;
-  await ensureLanguageBundlesLoaded(desired);
-  currentLang = desiredInput || def;
+  currentLang = desired || def;
   baseDefaultLang = def || DEFAULT_LANG;
   // If translation bundle missing, fall back to default bundle for UI
   if (!translations[currentLang]) currentLang = def;
@@ -230,16 +150,6 @@ export async function initI18n(opts = {}) {
 }
 
 export function getCurrentLang() { return currentLang; }
-
-export async function ensureLanguageBundle(langCode) {
-  const code = String(langCode || '').toLowerCase();
-  if (code) {
-    await ensureLanguageBundlesLoaded(code);
-    if (translations[code]) return translations[code];
-  }
-  await ensureLanguageBundlesLoaded(baseDefaultLang || DEFAULT_LANG);
-  return translations[code] || translations[currentLang] || translations[DEFAULT_LANG] || null;
-}
 
 // Translate helper: fetches a nested value from the current language bundle,
 // with graceful fallback to the default language.
@@ -405,15 +315,11 @@ async function loadContentFromFrontMatter(obj, lang) {
     if (!paths.length) continue;
 
     const variants = [];
-    const batchSize = (Number.isFinite(FRONTMATTER_FETCH_BATCH_SIZE) && FRONTMATTER_FETCH_BATCH_SIZE > 0)
-      ? FRONTMATTER_FETCH_BATCH_SIZE
-      : paths.length;
-
-    const fetchVariant = async (p) => {
+    for (const p of paths) {
       try {
         const url = `${getContentRoot()}/${p}`;
         const response = await fetch(url, { cache: 'no-store' });
-        if (!response || !response.ok) { return null; }
+        if (!response || !response.ok) { continue; }
         const content = await response.text();
         const { frontMatter } = parseFrontMatter(content);
 
@@ -427,7 +333,7 @@ async function loadContentFromFrontMatter(obj, lang) {
           return (baseDir + s).replace(/\/+/g, '/');
         };
 
-        return {
+        variants.push({
           location: p,
           image: resolveImagePath(frontMatter.image) || undefined,
           tag: frontMatter.tags || frontMatter.tag || undefined,
@@ -437,26 +343,13 @@ async function loadContentFromFrontMatter(obj, lang) {
           ai: truthy(frontMatter.ai || frontMatter.aiGenerated || frontMatter.llm) || undefined,
           draft: truthy(frontMatter.draft || frontMatter.wip || frontMatter.unfinished || frontMatter.inprogress) || undefined,
           __title: frontMatter.title || undefined
-        };
+        });
       } catch (error) {
         console.warn(`Failed to load content from ${p}:`, error);
-        return { location: p };
+        variants.push({ location: p });
       }
-    };
-
-    for (let i = 0; i < paths.length; i += batchSize) {
-      const slice = paths.slice(i, i + batchSize);
-      const settled = await Promise.allSettled(slice.map((p) => fetchVariant(p)));
-      settled.forEach((result, idx) => {
-        const pathForResult = slice[idx];
-        if (result.status === 'fulfilled') {
-          if (result.value) variants.push(result.value);
-        } else {
-          console.warn(`Failed to load content from ${pathForResult}:`, result.reason);
-          variants.push({ location: pathForResult });
-        }
-      });
     }
+
     // Choose the latest by date as the primary version
     const toTime = (d) => { const t = new Date(String(d || '')).getTime(); return Number.isFinite(t) ? t : -Infinity; };
     variants.sort((a, b) => toTime(b.date) - toTime(a.date));
@@ -473,254 +366,8 @@ async function loadContentFromFrontMatter(obj, lang) {
       return rest;
     });
     out[title] = meta;
-}
-
-  return { entries: out, availableLangs: Array.from(langsSeen).sort() };
-}
-
-function mergeMetadata(...sources) {
-  const merged = {};
-  for (const src of sources) {
-    if (!src || typeof src !== 'object') continue;
-    if (src.title != null) merged.title = String(src.title);
-    if (src.date != null) merged.date = src.date;
-    if (src.excerpt != null) merged.excerpt = String(src.excerpt);
-    if (src.summary != null && merged.excerpt == null) merged.excerpt = String(src.summary);
-    if (src.image != null) merged.image = src.image;
-    if (merged.image == null && src.cover != null) merged.image = src.cover;
-    if (merged.image == null && src.thumb != null) merged.image = src.thumb;
-    if (src.tag != null) merged.tag = src.tag;
-    if (src.tags != null && merged.tag == null) merged.tag = src.tags;
-    if (src.versionLabel != null) merged.versionLabel = src.versionLabel;
-    if (src.version != null && merged.versionLabel == null) merged.versionLabel = src.version;
-    if (src.ai != null) merged.ai = src.ai;
-    if (src.aiGenerated != null && merged.ai == null) merged.ai = src.aiGenerated;
-    if (src.llm != null && merged.ai == null) merged.ai = src.llm;
-    if (src.draft != null) merged.draft = src.draft;
-    if (src.wip != null && merged.draft == null) merged.draft = src.wip;
-    if (src.unfinished != null && merged.draft == null) merged.draft = src.unfinished;
-    if (src.inprogress != null && merged.draft == null) merged.draft = src.inprogress;
   }
-  return merged;
-}
-
-function normalizeVersionEntries(raw) {
-  if (Array.isArray(raw)) return raw;
-  if (raw == null) return [];
-  return [raw];
-}
-
-function truthyMetaFlag(value) {
-  if (value === true) return true;
-  if (value === false) return false;
-  const s = String(value ?? '').trim().toLowerCase();
-  if (!s) return false;
-  return ['true', '1', 'yes', 'y', 'on', 'enabled'].includes(s);
-}
-
-function resolveImageRelative(location, image) {
-  const src = String(image ?? '').trim();
-  if (!src) return undefined;
-  if (/^(https?:|data:)/i.test(src) || src.startsWith('/')) return src;
-  const loc = String(location || '');
-  const lastSlash = loc.lastIndexOf('/');
-  const baseDir = lastSlash >= 0 ? loc.slice(0, lastSlash + 1) : '';
-  return (baseDir + src).replace(/\\+/g, '/');
-}
-
-function normalizeVersionsWithMeta(raw, baseMeta = {}) {
-  const versions = [];
-  const items = normalizeVersionEntries(raw);
-  for (const item of items) {
-    if (typeof item === 'string') {
-      if (!item) continue;
-      const merged = { ...baseMeta };
-      versions.push({ location: item, ...merged });
-      continue;
-    }
-    if (!item || typeof item !== 'object') continue;
-    const location = String(item.location || item.path || '').trim();
-    if (!location) continue;
-    const merged = mergeMetadata(baseMeta, item);
-    versions.push({ location, ...merged });
-  }
-  return versions;
-}
-
-function pickPreferredBucket(entry, lang) {
-  if (!entry || typeof entry !== 'object') return null;
-  const nlang = normalizeLangKey(lang);
-  if (entry[nlang] != null) return { key: nlang, value: entry[nlang] };
-  if (entry[baseDefaultLang] != null) return { key: baseDefaultLang, value: entry[baseDefaultLang] };
-  if (entry.en != null) return { key: 'en', value: entry.en };
-  if (entry.default != null) return { key: 'default', value: entry.default };
-  const firstKey = Object.keys(entry).find((k) => entry[k] != null);
-  if (!firstKey) return null;
-  return { key: firstKey, value: entry[firstKey] };
-}
-
-function normalizeBucketMetadata(value, fallbackMeta = {}) {
-  if (value == null) return { versions: [] };
-  if (typeof value === 'string') {
-    const merged = { ...fallbackMeta };
-    return { versions: value ? [{ location: value, ...merged }] : [] };
-  }
-  if (Array.isArray(value)) {
-    const versions = value
-      .filter((item) => typeof item === 'string')
-      .map((loc) => ({ location: loc, ...fallbackMeta }));
-    return { versions };
-  }
-  if (typeof value === 'object') {
-    const mergedMeta = mergeMetadata(fallbackMeta, value);
-    if (Array.isArray(value.versions) && value.versions.length) {
-      const versions = normalizeVersionsWithMeta(value.versions, mergedMeta);
-      return { versions, meta: mergedMeta };
-    }
-    const location = String(value.location || value.path || '').trim();
-    if (location) {
-      const meta = mergeMetadata(mergedMeta, value);
-      return { versions: [{ location, ...meta }], meta };
-    }
-    const versions = normalizeVersionsWithMeta(value, mergedMeta);
-    return { versions, meta: mergedMeta };
-  }
-  return { versions: [] };
-}
-
-function wrapMetadataSourceForMerge(key, value) {
-  if (value == null) return null;
-  if (typeof value === 'object' && !Array.isArray(value)) return value;
-  return { [key]: value };
-}
-
-function hasEmbeddedMetadata(candidate) {
-  return candidate && typeof candidate === 'object' && !Array.isArray(candidate);
-}
-
-function deriveSimplifiedEntryFallbackMeta(entry, langKeys, chosen) {
-  const fallbackSources = [];
-  const normalizedLangs = new Set((langKeys || []).map((lk) => normalizeLangKey(lk)));
-
-  for (const [innerKey, innerVal] of Object.entries(entry || {})) {
-    const normalizedInner = normalizeLangKey(innerKey);
-    if (normalizedLangs.has(normalizedInner)) continue;
-    const wrapped = wrapMetadataSourceForMerge(innerKey, innerVal);
-    if (wrapped) fallbackSources.push(wrapped);
-  }
-
-  const chosenValue = chosen ? chosen.value : undefined;
-  if (!hasEmbeddedMetadata(chosenValue)) {
-    const defaultBucket = entry && entry.default;
-    if (hasEmbeddedMetadata(defaultBucket)) {
-      fallbackSources.push(defaultBucket);
-    }
-  }
-
-  return mergeMetadata(...fallbackSources);
-}
-
-function containsEmbeddedMetadataFields(candidate) {
-  if (!candidate || typeof candidate !== 'object') return false;
-  return Object.keys(candidate).some((key) => {
-    const lower = String(key).toLowerCase();
-    if (lower === 'location' || lower === 'path' || lower === 'versions') return false;
-    return EMBEDDED_METADATA_FIELDS.has(lower);
-  });
-}
-
-function bucketProvidesEmbeddedMetadata(entryMeta, bucket) {
-  if (containsEmbeddedMetadataFields(entryMeta)) return true;
-  if (bucket && containsEmbeddedMetadataFields(bucket.meta)) return true;
-  if (bucket && Array.isArray(bucket.versions)) {
-    for (const version of bucket.versions) {
-      if (containsEmbeddedMetadataFields(version)) return true;
-    }
-  }
-  return false;
-}
-
-async function loadContentFromSimplifiedMetadata(obj, lang) {
-  const out = {};
-  const langsSeen = new Set();
-  const entries = Object.entries(obj || {});
-
-  for (const [key, val] of entries) {
-    if (!val || typeof val !== 'object' || Array.isArray(val)) continue;
-
-    const langKeys = Object.keys(val).filter((k) => {
-      const nk = normalizeLangKey(k);
-      if (nk === 'default') return true;
-      if (nk !== k) return true;
-      return /^[a-z]{2,3}(?:-[a-z0-9]+)*$/i.test(String(k || ''));
-    });
-    langKeys.forEach((lk) => {
-      const normalized = normalizeLangKey(lk);
-      if (normalized !== 'default') langsSeen.add(normalized);
-    });
-
-    const chosen = pickPreferredBucket(val, lang);
-    if (!chosen || chosen.value == null) continue;
-
-    const entryMeta = deriveSimplifiedEntryFallbackMeta(val, langKeys, chosen);
-    const bucket = normalizeBucketMetadata(chosen.value, entryMeta);
-    const hasEmbedded = bucketProvidesEmbeddedMetadata(entryMeta, bucket);
-
-    if (!hasEmbedded) {
-      const fallback = await loadContentFromFrontMatter({ [key]: val }, lang);
-      (fallback.availableLangs || []).forEach((lk) => langsSeen.add(lk));
-      for (const [fallbackTitle, meta] of Object.entries(fallback.entries || {})) {
-        out[fallbackTitle] = meta;
-      }
-      continue;
-    }
-    if (!bucket.versions.length) continue;
-
-    const toTime = (d) => {
-      const t = new Date(String(d || '')).getTime();
-      return Number.isFinite(t) ? t : -Infinity;
-    };
-
-    const versions = bucket.versions
-      .map((ver) => {
-        const meta = mergeMetadata(entryMeta, bucket.meta || {}, ver);
-        const normalized = { ...meta };
-        normalized.location = ver.location;
-        normalized.image = resolveImageRelative(ver.location, normalized.image);
-        normalized.tag = normalized.tag != null ? normalized.tag : undefined;
-        normalized.ai = truthyMetaFlag(normalized.ai);
-        normalized.draft = truthyMetaFlag(normalized.draft);
-        return normalized;
-      })
-      .filter((ver) => ver.location);
-
-    if (!versions.length) continue;
-
-    versions.sort((a, b) => toTime(b.date) - toTime(a.date));
-    const primary = versions[0];
-    const title = primary.title || (bucket.meta && bucket.meta.title) || entryMeta.title || key;
-
-    const versionsForUi = versions.map((ver) => {
-      const { title: _t, ...rest } = ver;
-      return rest;
-    });
-
-    const meta = {
-      location: primary.location,
-      image: primary.image || undefined,
-      tag: primary.tag != null ? primary.tag : undefined,
-      date: primary.date || undefined,
-      excerpt: primary.excerpt || undefined,
-      versionLabel: primary.versionLabel || primary.version || undefined,
-      ai: primary.ai ? true : undefined,
-      draft: primary.draft ? true : undefined,
-      title,
-      versions: versionsForUi
-    };
-
-    out[title] = meta;
-  }
-
+  
   return { entries: out, availableLangs: Array.from(langsSeen).sort() };
 }
 
@@ -738,73 +385,7 @@ export async function loadContentJson(basePath, baseName) {
       const keys = Object.keys(obj || {});
       let isUnified = false;
       let isSimplified = false;
-      let simplifiedHasEmbeddedMeta = false;
-
-      const LANG_KEY_PATTERN = /^[a-z]{2,3}(?:-[a-z0-9]+)*$/i;
-      const RESERVED_SIMPLIFIED_KEYS = new Set(['location', 'path', 'versions']);
-      EMBEDDED_METADATA_FIELDS.forEach((field) => RESERVED_SIMPLIFIED_KEYS.add(field));
-      const looksLikeLang = (key) => {
-        if (!key) return false;
-        const normalized = normalizeLangKey(key);
-        const lower = String(normalized || '').toLowerCase();
-        if (lower === 'default') return true;
-        if (RESERVED_SIMPLIFIED_KEYS.has(lower)) return false;
-        if (normalized !== key) return true;
-        return LANG_KEY_PATTERN.test(String(key || ''));
-      };
-
-      const hasMetadataFields = (value) => {
-        if (!value || typeof value !== 'object') return false;
-        return Object.keys(value).some((k) => {
-          if (k === 'location' || k === 'path') return false;
-          if (k === 'versions') return false;
-          if (looksLikeLang(k)) return false;
-          return EMBEDDED_METADATA_FIELDS.has(String(k).toLowerCase());
-        });
-      };
-
-      const isMetadataBucket = (value) => {
-        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-        const keysInBucket = Object.keys(value);
-        if (!keysInBucket.length) return false;
-        let valid = false;
-        for (const key of keysInBucket) {
-          const lower = String(key).toLowerCase();
-          if (looksLikeLang(key)) return false;
-          if (key === 'location' || key === 'path') {
-            if (typeof value[key] === 'string') valid = true;
-            else return false;
-            continue;
-          }
-          if (key === 'versions') {
-            const arr = value[key];
-            if (!Array.isArray(arr)) return false;
-            const ok = arr.every((item) => {
-              if (typeof item === 'string') return true;
-              if (!item || typeof item !== 'object') return false;
-              if (looksLikeLang(Object.keys(item)[0] || '')) return false;
-              if (item.location && typeof item.location === 'string') return true;
-              if (item.path && typeof item.path === 'string') return true;
-              return false;
-            });
-            if (!ok) return false;
-            if (arr.some((item) => item && typeof item === 'object' && hasMetadataFields(item))) {
-              simplifiedHasEmbeddedMeta = true;
-            }
-            valid = true;
-            continue;
-          }
-          if (EMBEDDED_METADATA_FIELDS.has(lower)) {
-            simplifiedHasEmbeddedMeta = true;
-            valid = true;
-            continue;
-          }
-          return false;
-        }
-        if (hasMetadataFields(value)) simplifiedHasEmbeddedMeta = true;
-        return valid;
-      };
-
+      
       // Check if it's a simplified format (just path mappings) or unified format
       for (const k of keys) {
         const v = obj[k];
@@ -812,46 +393,27 @@ export async function loadContentJson(basePath, baseName) {
           // Check for simplified format (language -> path mapping)
           const innerKeys = Object.keys(v);
           const hasOnlyPaths = innerKeys.every(ik => {
-            if (!looksLikeLang(ik) && EMBEDDED_METADATA_FIELDS.has(String(ik).toLowerCase())) {
-              simplifiedHasEmbeddedMeta = true;
-              return true;
-            }
             const val = v[ik];
             if (typeof val === 'string') return true;
             if (Array.isArray(val)) return val.every(item => typeof item === 'string');
-            if (looksLikeLang(ik) && val && typeof val === 'object' && !Array.isArray(val)) {
-              if (isMetadataBucket(val)) return true;
-            }
-            if (!looksLikeLang(ik) && val && typeof val === 'object' && !Array.isArray(val) && isMetadataBucket(val)) {
-              return true;
-            }
             return false;
           });
-
+          
           if (hasOnlyPaths) {
             isSimplified = true;
             break;
           }
-
+          
           // Check for unified format
           if ('default' in v) { isUnified = true; break; }
-          if (innerKeys.some(ik => {
-            if (['tag','tags','image','date','excerpt','location','title','version','versionLabel','ai','draft'].includes(ik)) {
-              simplifiedHasEmbeddedMeta = true;
-              return false;
-            }
-            return !looksLikeLang(ik);
-          })) { isUnified = true; break; }
+          if (innerKeys.some(ik => !['tag','tags','image','date','excerpt','location'].includes(ik))) { isUnified = true; break; }
         }
       }
-
+      
       if (isSimplified) {
         // Handle simplified format - load metadata from front matter
         const current = getCurrentLang();
-        const handler = simplifiedHasEmbeddedMeta
-          ? loadContentFromSimplifiedMetadata
-          : loadContentFromFrontMatter;
-        const { entries, availableLangs } = await handler(obj, current);
+        const { entries, availableLangs } = await loadContentFromFrontMatter(obj, current);
         __setContentLangs(availableLangs);
         return entries;
       }
@@ -996,10 +558,6 @@ function __setContentLangs(list) {
 }
 export function getAvailableLangs() {
   // Prefer languages discovered from content (unified index), else manifest order, else loaded bundle keys
-  const current = getCurrentLang();
-  if (current && !translations[current]) {
-    ensureLanguageBundle(current).catch(() => {});
-  }
   if (__contentLangs && __contentLangs.length) return __contentLangs;
   if (languageManifest && languageManifest.length) return languageManifest.map((entry) => entry.value);
   return Object.keys(translations);

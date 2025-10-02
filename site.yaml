@@ -2,11 +2,13 @@
 
 siteTitle:
   default: "deemoe's journal"
+  en: "deemoe's journal"
   ja: "deemoe のジャーナル"
   zh: "deemoe 的日志"
 
 siteSubtitle:
   default: "Thanks for playing my game."
+  en: "Thanks for playing my game."
   zh: "眼见何事，情系何处，身在何方，心思何人"
 
 siteDescription: "deemoe's journal"

@@ -32,4 +32,4 @@
 
 [cmjang](https://cmjang.github.io/)
 
-[Lynx Car](https://www.lynx3.me)
+[LynxCatTheThird](https://www.lynx3.me/)

@@ -18,7 +18,13 @@ siteKeywords: "static blog, markdown, github pages, blog"
 avatar: assets/avatar.jpeg
 
 profileLinks:
-  - label: Github
+  -
+    label: GitHub
+    href: "https://github.com/deemoe404"
+
+links:
+  -
+    label: GitHub
     href: "https://github.com/deemoe404"
 
 resourceURL: "https://dee.moe/wwwroot/"

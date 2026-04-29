@@ -13,7 +13,7 @@ export function applyLazyLoadingIn(container) {
   } catch (_) {}
 }
 
-// Fade-in covers when each image loads; remove placeholder per-card
+// Keep covers visible while the skeleton marks loading; remove placeholder per-card.
 export function hydrateCardCovers(container) {
   try {
     const root = typeof container === 'string' ? document.querySelector(container) : (container || document);
@@ -27,9 +27,17 @@ export function hydrateCardCovers(container) {
         img.classList.add('is-loaded');
         if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
       };
-      if (img.complete && img.naturalWidth > 0) { done(); return; }
+      const fail = () => {
+        if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
+        img.style.opacity = '1';
+      };
+      if (img.complete) {
+        if (img.naturalWidth > 0) done();
+        else fail();
+        return;
+      }
       img.addEventListener('load', done, { once: true });
-      img.addEventListener('error', () => { if (ph && ph.parentNode) ph.parentNode.removeChild(ph); img.style.opacity = '1'; }, { once: true });
+      img.addEventListener('error', fail, { once: true });
       const inIndex = !!wrap.closest('.index');
       if (!inIndex) {
         // Link-card covers load immediately; nothing extra needed here
@@ -40,7 +48,7 @@ export function hydrateCardCovers(container) {
   } catch (_) {}
 }
 
-// Enhance post images: wrap with a reserved-ratio container + skeleton, fade-in when loaded
+// Enhance post images: wrap with a reserved-ratio container + skeleton overlay while loading.
 export function hydratePostImages(container) {
   try {
     const root = typeof container === 'string' ? document.querySelector(container) : (container || document);

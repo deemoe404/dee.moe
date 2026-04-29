@@ -182,15 +182,15 @@ async function warnLargeImagesInNative(containerSelector, cfg = {}, documentRef 
             : (windowRef && windowRef.navigator ? windowRef.navigator.language : 'en');
           const normalized = (langAttr || 'en').toLowerCase();
           const filename = url.split('/').pop() || url;
-          const isZhCn = normalized === 'zh' || normalized === 'zh-cn' || normalized.startsWith('zh-cn') || normalized === 'zh-hans' || normalized.startsWith('zh-hans') || normalized === 'zh-sg' || normalized === 'zh-my';
-          const isZhTw = normalized === 'zh-tw' || normalized.startsWith('zh-tw') || normalized === 'zh-hant' || normalized.startsWith('zh-hant');
-          const isZhHk = normalized === 'zh-hk' || normalized.startsWith('zh-hk') || normalized === 'zh-mo' || normalized.startsWith('zh-mo');
-          const message = isZhCn
+          const isChs = normalized === 'chs' || normalized.startsWith('chs-');
+          const isChtHk = normalized === 'cht-hk' || normalized.startsWith('cht-hk-');
+          const isChtTw = normalized === 'cht-tw' || normalized.startsWith('cht-tw-') || normalized === 'cht';
+          const message = isChs
             ? `发现大图资源：${filename}（${formatBytes(size)}）已超过阈值 ${thresholdKB} KB`
-            : isZhTw
-              ? `發現大型圖片資源：${filename}（${formatBytes(size)}）超過門檻 ${thresholdKB} KB`
-              : isZhHk
-                ? `發現大型圖片資源：${filename}（${formatBytes(size)}）超出上限 ${thresholdKB} KB`
+            : isChtHk
+              ? `發現大型圖片資源：${filename}（${formatBytes(size)}）超出上限 ${thresholdKB} KB`
+              : isChtTw
+                ? `發現大型圖片資源：${filename}（${formatBytes(size)}）超過門檻 ${thresholdKB} KB`
                 : (normalized === 'ja' || normalized.startsWith('ja'))
                   ? `大きな画像を検出: ${filename}（${formatBytes(size)}）はしきい値 ${thresholdKB} KB を超えています`
                   : `Large image detected: ${filename} (${formatBytes(size)}) exceeds threshold ${thresholdKB} KB`;
@@ -562,38 +562,6 @@ function initializeSyntaxHighlightingNative(params = {}) {
   return true;
 }
 
-function sequentialLoadCoversNative(containerSelector, documentRef = defaultDocument, windowRef = defaultWindow, maxConcurrent = 1) {
-  try {
-    const root = typeof containerSelector === 'string'
-      ? (documentRef ? documentRef.querySelector(containerSelector) : null)
-      : containerSelector;
-    if (!root) return;
-    const imgs = Array.from(root.querySelectorAll('.index img.card-cover'));
-    let idx = 0;
-    let active = 0;
-    const limit = Math.max(1, maxConcurrent || 1);
-    const startNext = () => {
-      while (active < limit && idx < imgs.length) {
-        const img = imgs[idx++];
-        if (!img || !img.isConnected) continue;
-        const src = img.getAttribute('data-src');
-        if (!src) continue;
-        active++;
-        const done = () => {
-          active--;
-          img.removeEventListener('load', done);
-          img.removeEventListener('error', done);
-          startNext();
-        };
-        img.addEventListener('load', done, { once: true });
-        img.addEventListener('error', done, { once: true });
-        setImageSrcNoStore(img, src, windowRef);
-      }
-    };
-    startNext();
-  } catch (_) {}
-}
-
 function enhanceIndexLayoutNative(params = {}, documentRef = defaultDocument, windowRef = defaultWindow) {
   const containerEl = params.containerElement || getContainerByRole('main', documentRef);
   const indexEl = params.indexElement || (containerEl ? containerEl.querySelector('.index') : null);
@@ -609,7 +577,6 @@ function enhanceIndexLayoutNative(params = {}, documentRef = defaultDocument, wi
     const cfg = (params.siteConfig && params.siteConfig.assetWarnings && params.siteConfig.assetWarnings.largeImage) || {};
     warnLargeImagesInNative(containerEl || containerSelector, cfg, documentRef, windowRef).catch(() => {});
   } catch (_) {}
-  sequentialLoadCoversNative(containerEl || containerSelector, documentRef, windowRef, 1);
   if (typeof params.setupSearch === 'function') {
     try { params.setupSearch(Array.isArray(params.allEntries) ? params.allEntries : []); } catch (_) {}
   }
@@ -743,26 +710,14 @@ function handleDocumentClickNative(params = {}, documentRef = defaultDocument, w
   return true;
 }
 
-function setImageSrcNoStore(img, src, windowRef = defaultWindow) {
+function setImageSrcWithBrowserCache(img, src) {
   try {
     if (!img) return;
     const val = String(src || '').trim();
     if (!val) return;
     const safeVal = sanitizeImageUrl(val);
     if (!safeVal) return;
-    if (/^(data:|blob:)/i.test(safeVal)) { img.setAttribute('src', safeVal); return; }
-    if (/^[a-z][a-z0-9+.-]*:/i.test(safeVal)) { img.setAttribute('src', safeVal); return; }
-    let abs = safeVal;
-    try { abs = new URL(safeVal, windowRef && windowRef.location ? windowRef.location.href : undefined).toString(); } catch (_) {}
-    fetch(abs, { cache: 'no-store' })
-      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
-      .then(b => {
-        const url = URL.createObjectURL(b);
-        try { const prev = img.dataset.blobUrl; if (prev) URL.revokeObjectURL(prev); } catch (_) {}
-        img.dataset.blobUrl = url;
-        img.setAttribute('src', url);
-      })
-      .catch(() => { img.setAttribute('src', safeVal); });
+    img.setAttribute('src', safeVal);
   } catch (_) {
     try { img.setAttribute('src', sanitizeImageUrl(src)); } catch (__) {}
   }
@@ -818,7 +773,7 @@ function renderSiteIdentityNative(params = {}, documentRef = defaultDocument, wi
   }
   if (avatar) {
     const img = documentRef.querySelector('.site-card .avatar');
-    if (img) setImageSrcNoStore(img, avatar, windowRef);
+    if (img) setImageSrcWithBrowserCache(img, avatar);
   }
   return true;
 }
@@ -1186,7 +1141,7 @@ function renderIndexViewNative(params = {}, documentRef = defaultDocument, windo
     const tag = value ? renderTags(value.tag) : '';
     const { coverSrc, useFallbackCover } = resolveCoverSource(value, siteConfig);
     const cover = (value && coverSrc)
-      ? `<div class="card-cover-wrap"><div class="ph-skeleton" aria-hidden="true"></div><img class="card-cover" alt="${escapeHtml(String(key || ''))}" data-src="${escapeHtml(cardImageSrc(coverSrc))}" loading="lazy" decoding="async" fetchpriority="low" width="1600" height="1000"></div>`
+      ? `<div class="card-cover-wrap"><div class="ph-skeleton" aria-hidden="true"></div><img class="card-cover" alt="${escapeHtml(String(key || ''))}" src="${escapeHtml(cardImageSrc(coverSrc))}" loading="lazy" decoding="async" fetchpriority="low" width="1600" height="1000"></div>`
       : (useFallbackCover ? fallbackCover(key) : '');
     const hasDate = value && value.date;
     const dateHtml = hasDate ? `<span class="card-date">${escapeHtml(formatDisplayDate(value.date))}</span>` : '';
@@ -1314,7 +1269,7 @@ function renderSearchResultsNative(params = {}, documentRef = defaultDocument, w
     const tag = value ? renderTags(value.tag) : '';
     const { coverSrc, useFallbackCover } = resolveCoverSource(value, siteConfig);
     const cover = (value && coverSrc)
-      ? `<div class="card-cover-wrap"><div class="ph-skeleton" aria-hidden="true"></div><img class="card-cover" alt="${escapeHtml(String(key || ''))}" data-src="${escapeHtml(cardImageSrc(coverSrc))}" loading="lazy" decoding="async" fetchpriority="low" width="1600" height="1000"></div>`
+      ? `<div class="card-cover-wrap"><div class="ph-skeleton" aria-hidden="true"></div><img class="card-cover" alt="${escapeHtml(String(key || ''))}" src="${escapeHtml(cardImageSrc(coverSrc))}" loading="lazy" decoding="async" fetchpriority="low" width="1600" height="1000"></div>`
       : (useFallbackCover ? fallbackCover(key) : '');
     const hasDate = value && value.date;
     const dateHtml = hasDate ? `<span class="card-date">${escapeHtml(formatDisplayDate(value.date))}</span>` : '';

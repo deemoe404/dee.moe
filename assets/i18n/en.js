@@ -113,7 +113,7 @@ const translations = {
         publishedLabel: ({ date }) => `Published on ${date}`,
         assetLabel: ({ name, size }) => `Asset: ${name} (${size})`,
         assetWithHash: ({ name, size, hash }) => `Asset: ${name} (${size}) — SHA-256 ${hash}`,
-        noAsset: 'No downloadable assets were attached to this release.',
+        noAsset: 'No NanoSite system update package was attached to this release.',
         status: {
           idle: 'Download the latest release ZIP, then select it to check for updates.',
           reading: 'Reading archive…',
@@ -127,6 +127,7 @@ const translations = {
           emptyFile: 'The selected file is empty.',
           invalidArchive: 'The selected ZIP could not be read as a NanoSite release.',
           sizeMismatch: ({ expected, actual }) => `The selected archive size (${actual}) does not match the release asset (${expected}).`,
+          digestMismatch: 'The selected archive SHA-256 does not match the release asset.',
           generic: 'System update failed. Please try again.'
         },
         fileStatus: {
@@ -159,6 +160,39 @@ const translations = {
           available: 'Local draft available'
         }
       },
+      frontMatter: {
+        heading: 'Front matter',
+        summaryDefault: 'Metadata for this post',
+        summary: ({ count }) => (count ? `${count} metadata field${count === 1 ? '' : 's'} active` : 'No metadata yet'),
+        help: 'Fill the metadata below. Leave a field empty to omit it from the file.',
+        empty: 'No front matter fields yet. Add values to include metadata.',
+        commonTitle: 'Common fields',
+        advancedTitle: 'Advanced fields',
+        booleanLabel: 'Enabled',
+        listHint: 'One item per line',
+        clear: 'Clear',
+        fields: {
+          title: 'Title',
+          excerpt: 'Excerpt',
+          author: 'Author',
+          date: 'Date',
+          tags: 'Tags',
+          image: 'Primary image',
+          draft: 'Draft',
+          version: 'Version',
+          ai: 'AI generated'
+        },
+        hints: {
+          title: 'Shown on cards and the browser title.',
+          excerpt: 'Short summary for cards and SEO.',
+          date: 'Publish date (ISO format recommended, e.g. 2024-03-18).',
+          tags: 'Enter one tag per line. Used for grouping and search.',
+          image: 'Fallback image for social previews.',
+          draft: 'Mark as draft to exclude from listings.',
+          version: 'Displayed as a version badge if provided.',
+          ai: 'Mark when the content is AI generated or assisted.'
+        }
+      },
       toolbar: {
         wrap: 'Wrap:',
         wrapOn: 'on',
@@ -166,6 +200,7 @@ const translations = {
         view: 'View:',
         viewEdit: 'Editor',
         viewPreview: 'Preview',
+        save: 'Save',
         discard: 'Discard',
         wrapAria: 'Wrap setting',
         viewAria: 'View switch'
@@ -280,7 +315,7 @@ const translations = {
           addLanguage: 'Add language',
           removeLanguage: 'Remove',
           noLanguages: 'No languages configured yet.',
-          promptLanguage: 'Enter a language code (for example: en, zh, ja):',
+          promptLanguage: 'Enter a language code (for example: en, chs, ja):',
           languageExists: 'That language already exists.',
           languageDefault: 'Default',
           languageAutoOption: 'Auto-detect (browser language)',
@@ -597,6 +632,18 @@ const translations = {
               create: 'Copy draft and create this file on GitHub.',
               update: 'Copy draft and update this file on GitHub.'
             }
+          },
+          save: {
+            label: 'Save',
+            busy: 'Saving…',
+            tooltips: {
+              default: 'Save local markdown draft in your browser.',
+              noFile: 'Open a markdown file before saving.',
+              empty: 'Add markdown content before saving.',
+              clean: 'No markdown changes to save.'
+            },
+            toastSuccess: 'Local draft saved.',
+            toastError: 'Failed to save local draft.'
           },
           discard: {
             label: 'Discard',

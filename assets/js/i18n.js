@@ -5,7 +5,7 @@
 //   register it in assets/i18n/languages.json.
 // - Content i18n supports a single unified YAML with per-language entries and default fallback.
 //   Prefer using one `wwwroot/index.yaml` that stores, per post, a `default` block and optional language blocks
-//   (e.g., `en`, `zh`, `ja`) describing `title` and `location`. Missing languages fall back to `default`.
+//   (e.g., `en`, `chs`, `ja`) describing `title` and `location`. Missing languages fall back to `default`.
 //   Legacy per-language files like `index.<lang>.yaml` and `tabs.<lang>.yaml` are also supported.
 // - Friendly language names come from assets/i18n/languages.json (or the language module's metadata).
 
@@ -14,7 +14,7 @@ import { getContentRoot } from './utils.js';
 import { fetchConfigWithYamlFallback } from './yaml.js';
 import enTranslations, { languageMeta as enLanguageMeta } from '../i18n/en.js';
 
-// Fetch of content files uses { cache: 'no-store' } to avoid stale data
+// Content fetch cache modes are normalized by cache-control.js.
 
 // Default language fallback when no user/browser preference is available.
 const DEFAULT_LANG = 'en';
@@ -311,8 +311,20 @@ function detectLang() {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) return saved;
   } catch (_) {}
-  const nav = (navigator.language || navigator.userLanguage || '').slice(0, 2);
-  return nav || DEFAULT_LANG;
+  const nav = typeof navigator !== 'undefined' ? (navigator.language || navigator.userLanguage || '') : '';
+  return normalizeBrowserLanguage(nav) || DEFAULT_LANG;
+}
+
+function normalizeBrowserLanguage(raw) {
+  const lower = String(raw || '').trim().toLowerCase();
+  if (!lower) return '';
+  const chineseBrowserPrefix = String.fromCharCode(122, 104);
+  if (lower === chineseBrowserPrefix || lower.startsWith(`${chineseBrowserPrefix}-`)) {
+    if (lower.includes('-hk') || lower.includes('-mo')) return 'cht-hk';
+    if (lower.includes('-tw') || lower.includes('-hant')) return 'cht-tw';
+    return 'chs';
+  }
+  return lower.slice(0, 2);
 }
 
 export async function initI18n(opts = {}) {
@@ -367,45 +379,40 @@ export function t(path, vars) {
 const NORMALIZED_LANG_ALIASES = new Map([
   ['english', 'en'],
   ['en', 'en'],
-  ['中文', 'zh'],
-  ['简体中文', 'zh'],
-  ['zh', 'zh'],
-  ['zh-cn', 'zh'],
-  ['繁體中文', 'zh-tw'],
-  ['繁体中文', 'zh-tw'],
-  ['正體中文', 'zh-tw'],
-  ['正体中文', 'zh-tw'],
-  ['台灣', 'zh-tw'],
-  ['臺灣', 'zh-tw'],
-  ['zh-tw', 'zh-tw'],
-  ['zh-hant', 'zh-tw'],
-  ['繁體中文（香港）', 'zh-hk'],
-  ['繁体中文（香港）', 'zh-hk'],
-  ['香港', 'zh-hk'],
-  ['香港繁體', 'zh-hk'],
-  ['香港繁体', 'zh-hk'],
-  ['粤语', 'zh-hk'],
-  ['粵語', 'zh-hk'],
-  ['廣東話', 'zh-hk'],
-  ['廣州話', 'zh-hk'],
-  ['香港話', 'zh-hk'],
-  ['zh-hk', 'zh-hk'],
-  ['zh-mo', 'zh-hk'],
-  ['zh-hant-hk', 'zh-hk'],
-  ['zh-hant-tw', 'zh-tw'],
+  ['中文', 'chs'],
+  ['简体中文', 'chs'],
+  ['chs', 'chs'],
+  ['繁體中文', 'cht-tw'],
+  ['繁体中文', 'cht-tw'],
+  ['正體中文', 'cht-tw'],
+  ['正体中文', 'cht-tw'],
+  ['台灣', 'cht-tw'],
+  ['臺灣', 'cht-tw'],
+  ['cht', 'cht-tw'],
+  ['cht-tw', 'cht-tw'],
+  ['繁體中文（香港）', 'cht-hk'],
+  ['繁体中文（香港）', 'cht-hk'],
+  ['香港', 'cht-hk'],
+  ['香港繁體', 'cht-hk'],
+  ['香港繁体', 'cht-hk'],
+  ['粤语', 'cht-hk'],
+  ['粵語', 'cht-hk'],
+  ['廣東話', 'cht-hk'],
+  ['廣州話', 'cht-hk'],
+  ['香港話', 'cht-hk'],
+  ['cht-hk', 'cht-hk'],
   ['日本語', 'ja'],
   ['にほんご', 'ja'],
   ['ja', 'ja'],
   ['jp', 'ja']
 ]);
 
-// Normalize common language labels seen in content JSON to BCP-47-ish codes
+// Normalize common language labels seen in content YAML to NanoSite language codes.
 export function normalizeLangKey(k) {
   const raw = String(k || '').trim();
   const lower = raw.toLowerCase();
   if (NORMALIZED_LANG_ALIASES.has(lower)) return NORMALIZED_LANG_ALIASES.get(lower);
-  // If looks like a code (xx or xx-YY), return lower base
-  if (/^[a-z]{2}(?:-[a-z]{2})?$/i.test(raw)) return lower;
+  if (/^[a-z]{2,3}(?:-[a-z0-9]+)*$/i.test(raw)) return lower;
   return raw; // fallback to original
 }
 
@@ -601,14 +608,16 @@ async function loadContentFromFrontMatter(obj, lang) {
 
 // Try to load unified YAML (`base.yaml`) first; if not unified or missing, fallback to legacy
 // per-language files (base.<currentLang>.yaml -> base.<default>.yaml -> base.yaml)
-export async function loadContentJson(basePath, baseName) {
+export async function loadContentJsonWithRaw(basePath, baseName) {
   // YAML only (unified or simplified)
+  let raw = null;
   try {
     const obj = await fetchConfigWithYamlFallback([
       `${basePath}/${baseName}.yaml`,
       `${basePath}/${baseName}.yml`
     ]);
     if (obj && typeof obj === 'object' && Object.keys(obj).length) {
+      raw = obj;
       // Heuristic: if any entry contains a `default` or a non-reserved language-like key, treat as unified
       const keys = Object.keys(obj || {});
       let isUnified = false;
@@ -643,7 +652,7 @@ export async function loadContentJson(basePath, baseName) {
         const current = getCurrentLang();
         const { entries, availableLangs } = await loadContentFromFrontMatter(obj, current);
         __setContentLangs(availableLangs);
-        return entries;
+        return { entries, raw };
       }
       
       if (isUnified) {
@@ -651,14 +660,19 @@ export async function loadContentJson(basePath, baseName) {
         const { entries, availableLangs } = transformUnifiedContent(obj, current);
         // Record available content languages so the dropdown can reflect them
         __setContentLangs(availableLangs);
-        return entries;
+        return { entries, raw };
       }
       // Not unified; fall through to legacy handling below
     }
   } catch (_) { /* fall back */ }
 
   // Legacy per-language YAML chain
-  return loadLangJson(basePath, baseName);
+  return { entries: await loadLangJson(basePath, baseName), raw };
+}
+
+export async function loadContentJson(basePath, baseName) {
+  const result = await loadContentJsonWithRaw(basePath, baseName);
+  return (result && result.entries) || {};
 }
 
 // Transform unified tabs YAML into a flat map: title -> { location }
@@ -785,14 +799,19 @@ function __setContentLangs(list) {
   } catch (_) { /* ignore */ }
 }
 export function getAvailableLangs() {
-  // Prefer languages discovered from content (unified index), else manifest order, else loaded bundle keys
+  // UI language choices come from the project language manifest. Content
+  // languages are intentionally separate: an article may omit variants and
+  // rely on the content fallback chain without hiding UI languages.
   const current = getCurrentLang();
   if (current && !translations[current]) {
     ensureLanguageBundle(current).catch(() => {});
   }
-  if (__contentLangs && __contentLangs.length) return __contentLangs;
   if (languageManifest && languageManifest.length) return languageManifest.map((entry) => entry.value);
   return Object.keys(translations);
+}
+
+export function getContentLangs() {
+  return __contentLangs && __contentLangs.length ? __contentLangs.slice() : [];
 }
 export function getLanguageLabel(code) {
   const normalized = String(code || '').toLowerCase();

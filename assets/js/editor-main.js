@@ -1,4 +1,5 @@
 import { configureFetchCachePolicy } from './cache-control.js';
+import { createMarkdownBlocksEditor } from './editor-blocks.js?v=action-menu-flip-20260505';
 import { createHiEditor } from './hieditor.js';
 import { mdParse } from './markdown.js';
 import { insertImageMarkdownAtSelection, normalizeDateInputValue } from './editor-markdown-ops.js';
@@ -11,16 +12,36 @@ import {
   resolveFrontMatterBindings,
   valueIsPresent
 } from './frontmatter-document.js';
-import { getContentRoot, setSafeHtml } from './utils.js';
-import { initSyntaxHighlighting } from './syntax-highlight.js';
+import { getContentRoot, resolveImageSrc, setSafeHtml } from './utils.js?v=editor-preview-images-20260504';
+import { initSyntaxHighlighting } from './syntax-highlight.js?v=blocks-code-gutter-20260505';
 import { applyLazyLoadingIn, hydratePostImages, hydratePostVideos } from './post-render.js';
 import { hydrateInternalLinkCards } from './link-cards.js';
 import { applyLangHints } from './typography.js';
 import { fetchConfigWithYamlFallback, fetchMergedSiteConfig } from './yaml.js';
-import { t, withLangParam, loadContentJsonWithRaw, getCurrentLang, normalizeLangKey } from './i18n.js?v=20260430sync';
+import { t, withLangParam, loadContentJsonWithRaw, getCurrentLang, normalizeLangKey } from './i18n.js?v=20260505welcome';
 
 const LS_WRAP_KEY = 'ns_editor_wrap_enabled';
+const LS_VIEW_KEY = 'ns_editor_markdown_view';
 const FORCE_MARKDOWN_WRAP = true;
+
+function normalizeMarkdownEditorView(mode) {
+  if (mode === 'preview') return 'preview';
+  if (mode === 'blocks') return 'blocks';
+  return 'edit';
+}
+
+function readPersistedMarkdownEditorView() {
+  try {
+    return normalizeMarkdownEditorView(localStorage.getItem(LS_VIEW_KEY));
+  } catch (_) {
+    return 'edit';
+  }
+}
+
+function persistMarkdownEditorView(mode) {
+  try { localStorage.setItem(LS_VIEW_KEY, normalizeMarkdownEditorView(mode)); }
+  catch (_) {}
+}
 
 const FRONT_MATTER_SECTION_DESCRIPTIONS = [
   {
@@ -49,6 +70,8 @@ const FRONT_MATTER_SECTION_DESCRIPTIONS = [
 
 const previewAssetBuckets = new Map();
 let previewAssetCurrentPath = '';
+let markdownBlocksEditor = null;
+let syncMarkdownBlocksFromSource = null;
 
 const ensureKeyOrder = (order = [], key) => {
   if (!key) return order;
@@ -67,6 +90,123 @@ const getContentRootPrefix = () => {
     return '';
   }
 };
+
+function syncFrontMatterLabelWidth(root) {
+  if (!root || typeof root.querySelectorAll !== 'function') return;
+  try {
+    if (typeof root.__nsFrontMatterLabelWidthCleanup === 'function') root.__nsFrontMatterLabelWidthCleanup();
+  } catch (_) {}
+  try { root.__nsFrontMatterLabelWidthCleanup = null; } catch (_) {}
+
+  const labels = Array.from(root.querySelectorAll('.frontmatter-field-title'));
+  if (!labels.length) {
+    try { root.style.removeProperty('--frontmatter-single-label-width'); } catch (_) {}
+    return;
+  }
+
+  let frame = 0;
+  let observer = null;
+  const requestFrame = (fn) => {
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      return window.requestAnimationFrame(fn);
+    }
+    if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(fn);
+    return setTimeout(fn, 0);
+  };
+  const cancelFrame = (id) => {
+    if (!id) return;
+    if (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+      window.cancelAnimationFrame(id);
+      return;
+    }
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id);
+    else clearTimeout(id);
+  };
+  const measureLabelText = (label) => {
+    let width = label.scrollWidth || 0;
+    try {
+      const doc = label.ownerDocument || document;
+      if (!doc || !doc.body) return width;
+      const probe = doc.createElement('span');
+      probe.textContent = label.textContent || '';
+      probe.style.position = 'absolute';
+      probe.style.visibility = 'hidden';
+      probe.style.pointerEvents = 'none';
+      probe.style.whiteSpace = 'nowrap';
+      probe.style.left = '-9999px';
+      probe.style.top = '0';
+      const sourceStyle = typeof window !== 'undefined' && typeof window.getComputedStyle === 'function'
+        ? window.getComputedStyle(label)
+        : null;
+      if (sourceStyle) {
+        probe.style.fontFamily = sourceStyle.fontFamily;
+        probe.style.fontSize = sourceStyle.fontSize;
+        probe.style.fontStyle = sourceStyle.fontStyle;
+        probe.style.fontWeight = sourceStyle.fontWeight;
+        probe.style.letterSpacing = sourceStyle.letterSpacing;
+        probe.style.textTransform = sourceStyle.textTransform;
+      }
+      doc.body.appendChild(probe);
+      width = Math.max(width, probe.scrollWidth || Math.ceil(probe.getBoundingClientRect().width) || 0);
+      probe.remove();
+    } catch (_) {}
+    return width;
+  };
+  const measure = () => {
+    frame = 0;
+    let width = 88;
+    labels.forEach((label) => {
+      const target = label.closest ? label.closest('.frontmatter-field-label-wrap') : label;
+      let measured = 0;
+      try {
+        const tooltip = target && target.querySelector ? target.querySelector('.frontmatter-help-tooltip') : null;
+        const tooltipWidth = tooltip ? tooltip.scrollWidth || 0 : 0;
+        const labelWidth = measureLabelText(label);
+        const targetStyle = typeof window !== 'undefined' && typeof window.getComputedStyle === 'function'
+          ? window.getComputedStyle(target || label)
+          : null;
+        const gap = targetStyle ? parseFloat(targetStyle.gap || targetStyle.columnGap || '0') || 0 : 0;
+        measured = labelWidth + tooltipWidth + gap;
+      } catch (_) {
+        try {
+          const tooltip = target && target.querySelector ? target.querySelector('.frontmatter-help-tooltip') : null;
+          measured = measureLabelText(label) + (tooltip ? tooltip.scrollWidth || 0 : 0);
+        } catch (_) {}
+      }
+      width = Math.max(width, measured);
+    });
+    try { root.style.setProperty('--frontmatter-single-label-width', `${Math.ceil(width)}px`); } catch (_) {}
+  };
+  const schedule = () => {
+    if (frame) return;
+    frame = requestFrame(measure);
+  };
+
+  if (typeof ResizeObserver === 'function') {
+    try {
+      observer = new ResizeObserver(schedule);
+      observer.observe(root);
+      labels.forEach((label) => {
+        const cell = label.closest ? label.closest('.frontmatter-field-label-wrap') : label;
+        observer.observe(cell || label);
+      });
+    } catch (_) {
+      observer = null;
+    }
+  }
+
+  try {
+    if (document.fonts && typeof document.fonts.ready?.then === 'function') document.fonts.ready.then(schedule).catch(() => {});
+  } catch (_) {}
+  schedule();
+
+  root.__nsFrontMatterLabelWidthCleanup = () => {
+    cancelFrame(frame);
+    frame = 0;
+    try { if (observer) observer.disconnect(); } catch (_) {}
+    observer = null;
+  };
+}
 
 const safePreviewMime = (mime) => {
   try {
@@ -264,9 +404,11 @@ const applyPreviewAssetOverrides = (container, markdownPath) => {
 };
 
 const refreshPreviewAssetOverrides = () => {
-  const target = document.getElementById('mainview');
-  if (!target) return;
-  applyPreviewAssetOverrides(target, previewAssetCurrentPath);
+  ['mainview', 'blocks-wrap'].forEach((id) => {
+    const target = document.getElementById(id);
+    if (!target) return;
+    applyPreviewAssetOverrides(target, previewAssetCurrentPath);
+  });
 };
 
 const fetchMarkdownForLinkCard = (loc) => {
@@ -533,21 +675,59 @@ function $(sel) { return document.querySelector(sel); }
 
 function switchView(mode) {
   const editorWrap = $('#editor-wrap');
+  const blocksWrap = $('#blocks-wrap');
   const previewWrap = $('#preview-wrap');
-  const btnEdit = document.querySelector('.vt-btn[data-view="edit"]');
-  const btnPreview = document.querySelector('.vt-btn[data-view="preview"]');
+  const editorShell = $('#markdownEditorShell');
+  const editorToolbar = $('#editorToolbar');
+  const viewToggle = document.querySelector('.view-toggle');
+  const viewButtons = Array.from(document.querySelectorAll('.vt-btn[data-view]'));
   if (!editorWrap || !previewWrap) return;
+  if (editorShell) editorShell.classList.toggle('is-blocks-mode', mode === 'blocks');
   if (mode === 'preview') {
     editorWrap.style.display = 'none';
+    if (blocksWrap) {
+      blocksWrap.hidden = true;
+      blocksWrap.setAttribute('aria-hidden', 'true');
+    }
+    if (editorShell) editorShell.style.display = 'none';
     previewWrap.style.display = '';
-    btnEdit && btnEdit.classList.remove('active');
-    btnPreview && btnPreview.classList.add('active');
+    if (editorToolbar) {
+      editorToolbar.hidden = true;
+      editorToolbar.setAttribute('aria-hidden', 'true');
+    }
+    viewToggle && (viewToggle.dataset.view = 'preview');
+  } else if (mode === 'blocks') {
+    if (typeof syncMarkdownBlocksFromSource === 'function') {
+      try { syncMarkdownBlocksFromSource(); } catch (_) {}
+    }
+    previewWrap.style.display = 'none';
+    if (editorShell) editorShell.style.display = '';
+    editorWrap.style.display = 'none';
+    if (blocksWrap) {
+      blocksWrap.hidden = false;
+      blocksWrap.removeAttribute('aria-hidden');
+    }
+    if (editorToolbar) {
+      editorToolbar.hidden = true;
+      editorToolbar.setAttribute('aria-hidden', 'true');
+    }
+    viewToggle && (viewToggle.dataset.view = 'blocks');
+    try { if (markdownBlocksEditor && typeof markdownBlocksEditor.focus === 'function') markdownBlocksEditor.focus(); } catch (_) {}
   } else {
     previewWrap.style.display = 'none';
+    if (editorShell) editorShell.style.display = '';
     editorWrap.style.display = '';
-    btnPreview && btnPreview.classList.remove('active');
-    btnEdit && btnEdit.classList.add('active');
+    if (blocksWrap) {
+      blocksWrap.hidden = true;
+      blocksWrap.setAttribute('aria-hidden', 'true');
+    }
+    if (editorToolbar) {
+      editorToolbar.hidden = false;
+      editorToolbar.removeAttribute('aria-hidden');
+    }
+    viewToggle && (viewToggle.dataset.view = 'edit');
   }
+  viewButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.view === (mode === 'preview' ? 'preview' : mode === 'blocks' ? 'blocks' : 'edit')));
 }
 
 function renderPreview(mdText) {
@@ -574,7 +754,7 @@ function renderPreview(mdText) {
       fetchMarkdown: fetchMarkdownForLinkCard
     }); } catch (_) {}
     try { hydratePostVideos(target); } catch (_) {}
-    try { initSyntaxHighlighting(); } catch (_) {}
+    try { initSyntaxHighlighting(target); } catch (_) {}
     try { applyPreviewAssetOverrides(target, previewAssetCurrentPath); } catch (_) {}
   } catch (_) {}
 }
@@ -587,6 +767,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const imageButton = document.getElementById('btnInsertImage');
   const imageInput = document.getElementById('editorImageInput');
   const editorToolbarEl = document.getElementById('editorToolbar');
+  const blocksWrap = document.getElementById('blocks-wrap');
   const cardButton = document.getElementById('btnInsertCard');
   const cardPopover = document.getElementById('editorCardPicker');
   const cardSearchInput = document.getElementById('cardPickerSearch');
@@ -993,6 +1174,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (parent) parent.appendChild(entry.container);
       });
       if (extraSection) extraSection.hidden = false;
+      syncFrontMatterLabelWidth(panel);
     };
 
     const updateSummary = () => {
@@ -1014,6 +1196,7 @@ document.addEventListener('DOMContentLoaded', () => {
         applyValueToEntry(entry, state.data[nextKey]);
       });
       updateSummary();
+      syncFrontMatterLabelWidth(panel);
     };
 
     const setFromMarkdown = (raw, opts = {}) => {
@@ -1042,21 +1225,187 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     };
 
+    const clear = () => {
+      state = {
+        data: {},
+        order: [],
+        eol: '\n',
+        trailingNewline: false,
+        bindings: new Map(),
+        hasFrontMatter: false,
+        document: null
+      };
+      rebuildBindings();
+    };
+
     ensureBaseFields();
     updateSummary();
     applySectionDescriptions();
+    syncFrontMatterLabelWidth(panel);
 
     return {
       panel,
       setChangeHandler: (fn) => { changeHandler = typeof fn === 'function' ? fn : () => {}; },
       setFromMarkdown,
       buildMarkdown,
+      clear,
       updateSummary,
       applySectionDescriptions
     };
   })();
 
   let frontMatterVisible = true;
+  let tabsMetadataVisible = false;
+  const tabsMetadataChangeListeners = new Set();
+
+  const tabsMetadataManager = (() => {
+    const panel = document.getElementById('frontMatterPanel');
+    const body = document.getElementById('frontMatterBody');
+    if (!panel || !body) return null;
+
+    const translate = (key, fallback) => {
+      if (!key) return fallback;
+      const translated = t(key);
+      if (translated == null || translated === key) return fallback != null ? fallback : key;
+      return translated;
+    };
+
+    const translateWithLocaleFallback = (key, fallbacks = {}) => {
+      const translated = translate(key, null);
+      if (translated != null && translated !== key) return translated;
+      let lang = 'en';
+      try {
+        lang = normalizeLangKey(getCurrentLang()) || 'en';
+      } catch (_) {
+        lang = 'en';
+      }
+      if (fallbacks[lang]) return fallbacks[lang];
+      if (lang === 'cht-hk' && fallbacks['cht-tw']) return fallbacks['cht-tw'];
+      if (lang.startsWith('cht') && fallbacks['cht-tw']) return fallbacks['cht-tw'];
+      if (lang.startsWith('ch') && fallbacks.chs) return fallbacks.chs;
+      if (lang.startsWith('ja') && fallbacks.ja) return fallbacks.ja;
+      return fallbacks.en || key;
+    };
+
+    const section = document.createElement('div');
+    section.className = 'frontmatter-section';
+    section.id = 'tabsMetadataSection';
+    section.hidden = true;
+
+    const head = document.createElement('div');
+    head.className = 'frontmatter-section-head';
+    const title = document.createElement('h3');
+    title.className = 'frontmatter-section-title';
+    title.textContent = translateWithLocaleFallback('editor.tabsMetadata.title', {
+      en: 'Page attributes',
+      chs: '页面属性',
+      'cht-tw': '頁面屬性',
+      'cht-hk': '頁面屬性',
+      ja: 'ページ属性'
+    });
+    const description = document.createElement('p');
+    description.className = 'frontmatter-section-description';
+    description.textContent = translateWithLocaleFallback('editor.tabsMetadata.description', {
+      en: 'Metadata stored in tabs.yaml for the current page language.',
+      chs: '当前页面语言在 tabs.yaml 中保存的元数据。',
+      'cht-tw': '目前頁面語言在 tabs.yaml 中儲存的中繼資料。',
+      'cht-hk': '目前頁面語言在 tabs.yaml 中儲存的中繼資料。',
+      ja: '現在のページ言語について tabs.yaml に保存されるメタデータ。'
+    });
+    head.append(title, description);
+
+    const grid = document.createElement('div');
+    grid.className = 'frontmatter-grid';
+
+    const field = document.createElement('div');
+    field.className = 'frontmatter-field frontmatter-field-text';
+    field.dataset.fieldId = 'tabs-title';
+
+    const fieldHead = document.createElement('div');
+    fieldHead.className = 'frontmatter-field-head';
+    const labelWrap = document.createElement('div');
+    labelWrap.className = 'frontmatter-field-label-wrap';
+    const label = document.createElement('span');
+    label.className = 'frontmatter-field-title';
+    label.textContent = translateWithLocaleFallback('editor.tabsMetadata.fields.title', {
+      en: 'Title',
+      chs: '标题',
+      'cht-tw': '標題',
+      'cht-hk': '標題',
+      ja: 'タイトル'
+    });
+    labelWrap.appendChild(label);
+    fieldHead.appendChild(labelWrap);
+
+    const controls = document.createElement('div');
+    controls.className = 'frontmatter-field-controls';
+    const input = document.createElement('input');
+    input.type = 'text';
+    controls.appendChild(input);
+    field.append(fieldHead, controls);
+    grid.appendChild(field);
+    section.append(head, grid);
+    body.appendChild(section);
+    syncFrontMatterLabelWidth(panel);
+
+    let suppressEvents = false;
+    let changeHandler = () => {};
+    let state = { title: '' };
+
+    const getState = () => ({ title: state.title || '' });
+
+    const emitChange = () => {
+      try { changeHandler(getState()); }
+      catch (_) {}
+    };
+
+    input.addEventListener('input', () => {
+      if (suppressEvents) return;
+      state = { title: input.value };
+      emitChange();
+    });
+
+    return {
+      panel,
+      section,
+      setVisible: (visible) => {
+        section.hidden = !visible;
+      },
+      setChangeHandler: (fn) => {
+        changeHandler = typeof fn === 'function' ? fn : () => {};
+      },
+      setValue: (value, opts = {}) => {
+        const nextTitle = value && typeof value === 'object'
+          ? String(value.title || '')
+          : String(value || '');
+        state = { title: nextTitle };
+        suppressEvents = true;
+        try {
+          input.value = nextTitle;
+        } finally {
+          suppressEvents = false;
+        }
+        if (!opts.silent) emitChange();
+      }
+    };
+  })();
+
+  const updateMetadataPanelVisibility = () => {
+    const panel = (frontMatterManager && frontMatterManager.panel) || (tabsMetadataManager && tabsMetadataManager.panel);
+    if (!panel) return;
+    const visible = !!frontMatterVisible || !!tabsMetadataVisible;
+    panel.hidden = !visible;
+    panel.dataset.state = visible ? 'ready' : 'hidden';
+    panel.dataset.frontmatterVisible = frontMatterVisible ? 'true' : 'false';
+    panel.dataset.tabsMetadataVisible = tabsMetadataVisible ? 'true' : 'false';
+    panel.dataset.tabsVisible = tabsMetadataVisible ? 'true' : 'false';
+    panel.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    panel.style.display = visible ? '' : 'none';
+    if (tabsMetadataManager && typeof tabsMetadataManager.setVisible === 'function') {
+      tabsMetadataManager.setVisible(tabsMetadataVisible);
+    }
+    syncFrontMatterLabelWidth(panel);
+  };
 
   const normalizeCurrentFilePathForMode = (path) => {
     const raw = String(path || '').trim().replace(/\\+/g, '/').replace(/^\/+/, '');
@@ -1078,13 +1427,20 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   const setFrontMatterVisible = (visible) => {
-    frontMatterVisible = !!visible;
-    const panel = frontMatterManager && frontMatterManager.panel;
-    if (!panel) return;
-    panel.hidden = !frontMatterVisible;
-    panel.dataset.frontmatterVisible = frontMatterVisible ? 'true' : 'false';
-    panel.setAttribute('aria-hidden', frontMatterVisible ? 'false' : 'true');
-    panel.style.display = frontMatterVisible ? '' : 'none';
+    const nextVisible = !!visible;
+    const shouldClear = !nextVisible && frontMatterVisible;
+    frontMatterVisible = nextVisible;
+    if (shouldClear && frontMatterManager && typeof frontMatterManager.clear === 'function') frontMatterManager.clear();
+    const commonSection = document.getElementById('frontMatterCommonSection');
+    const extraSection = document.getElementById('frontMatterExtraSection');
+    if (commonSection) commonSection.hidden = !frontMatterVisible;
+    if (extraSection) extraSection.hidden = !frontMatterVisible;
+    updateMetadataPanelVisibility();
+  };
+
+  const setTabsMetadataVisible = (visible) => {
+    tabsMetadataVisible = !!visible;
+    updateMetadataPanelVisibility();
   };
 
   const changeListeners = new Set();
@@ -1100,6 +1456,16 @@ document.addEventListener('DOMContentLoaded', () => {
       notifyChange();
     });
   }
+
+  if (tabsMetadataManager) {
+    tabsMetadataManager.setChangeHandler((value) => {
+      tabsMetadataChangeListeners.forEach((fn) => {
+        try { fn(value); } catch (_) {}
+      });
+    });
+  }
+
+  updateMetadataPanelVisibility();
 
   const handleAssetPreviewEvent = (event) => {
     if (!event || !event.detail) return;
@@ -1158,6 +1524,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (editor) editor.setValue(bodyText);
     else if (ta) ta.value = bodyText;
     requestLayout();
+    if (markdownBlocksEditor && blocksWrap && !blocksWrap.hidden && typeof markdownBlocksEditor.setMarkdown === 'function') {
+      try { markdownBlocksEditor.setMarkdown(bodyText); } catch (_) {}
+    }
     if (preview) renderPreview(getValue());
     if (notify) notifyChange();
   };
@@ -1174,6 +1543,160 @@ document.addEventListener('DOMContentLoaded', () => {
       try { window.__ns_editor_base_dir = fallback; } catch (__) {}
     }
   };
+
+  const blockLabelFallbacks = {
+    toolbarAria: 'Block tools',
+    listAria: 'Markdown blocks',
+    virtualBlockAria: 'New block',
+    virtualBlockPlaceholder: 'Type / to chose a block',
+    commandMenuAria: 'Block selector',
+    paragraph: 'Paragraph',
+    heading: 'Heading',
+    image: 'Image',
+    list: 'List',
+    quote: 'Quote',
+    code: 'Code',
+    source: 'Markdown',
+    articleCard: 'Article Card',
+    uploadImage: 'Upload Image',
+    cardSearch: 'Search articles...',
+    cardEmpty: 'No matching articles',
+    empty: 'No blocks yet.',
+    actions: 'More actions',
+    moveUp: 'Move up',
+    moveDown: 'Move down',
+    addBefore: 'Add before',
+    addAfter: 'Add after',
+    delete: 'Delete',
+    imageAlt: 'Alt text',
+    imagePath: 'Image path',
+    replaceImage: 'Replace image',
+    unordered: 'Bulleted',
+    ordered: 'Numbered',
+    task: 'Checklist',
+    codeLanguage: 'Language',
+    cardLabel: 'Card label',
+    cardLocation: 'post/path/file.md',
+    inlineToolbarAria: 'Inline formatting',
+    inlineBold: 'Bold',
+    inlineItalic: 'Italic',
+    inlineStrike: 'Strikethrough',
+    inlineCode: 'Inline code',
+    inlineLink: 'Link',
+    inlineMore: 'More formatting',
+    linkPrompt: 'Link URL',
+    linkText: 'Link text',
+    linkHref: 'Link URL',
+    linkTitle: 'Link title',
+    unlink: 'Unlink',
+    listAddItem: 'Add item',
+    listRemoveItem: 'Remove item',
+    imageTitle: 'Image title',
+    'sourceReason.blank': 'This empty Markdown segment is preserved as source.',
+    'sourceReason.frontMatter': 'Front matter is preserved as raw Markdown so document metadata stays intact.',
+    'sourceReason.unclosedFence': 'This fenced code block is incomplete, so it is kept as Markdown source.',
+    'sourceReason.callout': 'This block uses callout-style Markdown that the visual block editor does not edit directly.',
+    'sourceReason.table': 'This table-like Markdown is kept as source because the visual block editor does not support table editing yet.',
+    'sourceReason.indentedList': 'This list starts with indentation, so it is kept as source to avoid changing whether it means a nested list or code-like Markdown.',
+    'sourceReason.mixedList': 'This list starts from an unsupported mixed indentation, so it is kept as Markdown source.',
+    'sourceReason.image': 'This paragraph contains inline image Markdown, so it is kept as source to avoid changing the mixed content.',
+    'sourceReason.rawHtml': 'This paragraph contains raw HTML outside inline code, so it is kept as Markdown source.',
+    'sourceReason.unsupported': 'This Markdown is kept as source because the block editor cannot safely convert it to a visual block without changing the original structure.',
+    'sourceAutofix.label': 'Autofix',
+    'sourceAutofix.indentedList': 'Autofix: remove the shared list indentation and convert this Markdown into a visual list block.',
+    'sourceAutofix.unsupported': 'Autofix'
+  };
+  const blockLabels = new Proxy({}, {
+    get: (_target, key) => {
+      const name = String(key || '');
+      const translationKey = `editor.blocks.${name}`;
+      const translated = t(translationKey);
+      return translated != null && translated !== translationKey ? translated : (blockLabelFallbacks[name] || name);
+    }
+  });
+  let pendingBlocksImageInsert = null;
+  let pendingImagePickerToken = 0;
+  const armImagePickerCancelReset = (token) => {
+    const clearIfPickerStillPending = () => {
+      window.setTimeout(() => {
+        if (token !== pendingImagePickerToken) return;
+        const hasFiles = imageInput && imageInput.files && imageInput.files.length;
+        if (!hasFiles) pendingBlocksImageInsert = null;
+      }, 250);
+    };
+    window.addEventListener('focus', clearIfPickerStillPending, { once: true });
+    if (imageInput) {
+      imageInput.addEventListener('cancel', clearIfPickerStillPending, { once: true });
+      imageInput.addEventListener('blur', clearIfPickerStillPending, { once: true });
+    }
+  };
+  const openImageInputPicker = () => {
+    if (!imageInput) {
+      pendingBlocksImageInsert = null;
+      return;
+    }
+    pendingImagePickerToken += 1;
+    const pickerToken = pendingImagePickerToken;
+    try { imageInput.value = ''; } catch (_) {}
+    armImagePickerCancelReset(pickerToken);
+    try { imageInput.click(); }
+    catch (_) {
+      try { imageInput.dispatchEvent(new MouseEvent('click', { bubbles: true })); }
+      catch (__) {}
+    }
+  };
+  const setEditorBodyFromBlocks = (body) => {
+    const text = body == null ? '' : String(body);
+    if (editor) editor.setValue(text);
+    else if (ta) ta.value = text;
+    requestLayout();
+    renderPreview(getValue());
+    notifyChange();
+  };
+  if (blocksWrap) {
+    markdownBlocksEditor = createMarkdownBlocksEditor(blocksWrap, {
+      labels: blockLabels,
+      onChange: setEditorBodyFromBlocks,
+      getBaseDir: () => (window.__ns_editor_base_dir && String(window.__ns_editor_base_dir)) || `${getContentRoot()}/`,
+      resolveImageSrc,
+      hydrateImages: (node) => {
+        try { applyPreviewAssetOverrides(node, getCurrentMarkdownPath()); } catch (_) {}
+      },
+      hydrateCard: (node) => {
+        try {
+          hydrateInternalLinkCards(node, {
+            allowedLocations: linkCardReady ? editorAllowedLocations : null,
+            locationAliasMap: linkCardReady ? editorLocationAliasMap : new Map(),
+            postsByLocationTitle: linkCardReady ? editorPostsByLocationTitle : {},
+            postsIndexCache: linkCardReady ? editorPostsIndexCache : {},
+            siteConfig: editorSiteConfig,
+            translate: t,
+            makeHref: (loc) => withLangParam(`?id=${encodeURIComponent(loc)}`),
+            fetchMarkdown: fetchMarkdownForLinkCard
+          });
+          applyPreviewAssetOverrides(node, getCurrentMarkdownPath());
+        } catch (_) {}
+      },
+      requestImageUpload: ({ index, replaceIndex, replaceBlockId } = {}) => {
+        pendingBlocksImageInsert = {
+          index: Number.isFinite(index) ? index : null,
+          replaceIndex: Number.isFinite(replaceIndex) ? replaceIndex : null,
+          replaceBlockId: typeof replaceBlockId === 'string' && replaceBlockId ? replaceBlockId : null
+        };
+        if (!getCurrentMarkdownPath()) {
+          emitEditorToast('warn', t('editor.toasts.markdownOpenBeforeInsert'));
+          pendingBlocksImageInsert = null;
+          return;
+        }
+        openImageInputPicker();
+      }
+    });
+    syncMarkdownBlocksFromSource = () => {
+      if (markdownBlocksEditor && typeof markdownBlocksEditor.setMarkdown === 'function') {
+        markdownBlocksEditor.setMarkdown(getEditorBody());
+      }
+    };
+  }
 
   const STATUS_LABEL_KEYS = {
     checking: 'editor.currentFile.status.checking',
@@ -1730,9 +2253,13 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('ns-editor-language-applied', () => {
     tooltipButtons.forEach(btn => applyButtonTooltipState(btn, !!btn.disabled));
     renderCurrentFileIndicator();
+    if (markdownBlocksEditor && typeof markdownBlocksEditor.requestLayout === 'function') {
+      try { markdownBlocksEditor.requestLayout(); } catch (_) {}
+    }
     if (frontMatterManager) {
       frontMatterManager.updateSummary();
       frontMatterManager.applySectionDescriptions();
+      syncFrontMatterLabelWidth(frontMatterManager.panel);
     }
   });
 
@@ -1757,8 +2284,14 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  const handleBlocksCardContextUpdate = (entries) => {
+    if (!markdownBlocksEditor || typeof markdownBlocksEditor.setCardEntries !== 'function') return;
+    markdownBlocksEditor.setCardEntries(Array.isArray(entries) ? entries : editorPostPickerEntries);
+  };
   editorLinkCardContextListeners.add(handleCardContextUpdate);
+  editorLinkCardContextListeners.add(handleBlocksCardContextUpdate);
   handleCardContextUpdate();
+  handleBlocksCardContextUpdate(editorPostPickerEntries);
 
   const getCurrentMarkdownPath = () => {
     if (currentFileInfo && currentFileInfo.path) return String(currentFileInfo.path);
@@ -1920,8 +2453,10 @@ document.addEventListener('DOMContentLoaded', () => {
       if (fileList && fileList.length) emitEditorToast('warn', 'Only image files can be inserted.');
       return;
     }
+    if (options.singleImage && files.length > 1) files.splice(1);
 
     const textarea = getEditorTextarea();
+    const customInsertMarkdown = typeof options.insertMarkdown === 'function' ? options.insertMarkdown : null;
     let lastSelection = null;
 
     for (let i = 0; i < files.length; i += 1) {
@@ -1941,10 +2476,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const meta = buildAssetFileMeta(file);
       const paths = computeAssetPaths(markdownPath, meta.fileName);
-      const selection = insertImageMarkdown(paths.relativePath, meta.altText);
+      let selection;
+      if (customInsertMarkdown) {
+        selection = customInsertMarkdown(paths.relativePath, meta.altText);
+        if (selection === false) {
+          if (options.insertAbortToast) emitEditorToast('warn', options.insertAbortToast);
+          continue;
+        }
+        selection = selection || {};
+      } else {
+        selection = insertImageMarkdown(paths.relativePath, meta.altText);
+      }
       lastSelection = selection;
 
-      if (textarea) {
+      if (!customInsertMarkdown && textarea) {
         try {
           textarea.focus();
           textarea.setSelectionRange(selection.altStart, selection.altEnd);
@@ -1971,7 +2516,7 @@ document.addEventListener('DOMContentLoaded', () => {
         console.error('Failed to dispatch asset-added event', err);
       }
 
-      emitEditorToast('success', `Inserted ${paths.relativePath}`);
+      emitEditorToast('success', t('editor.toasts.assetAttached', { label: paths.relativePath }));
     }
   };
 
@@ -2178,15 +2723,9 @@ document.addEventListener('DOMContentLoaded', () => {
     crumbs.forEach((item, index) => {
       if (index > 0) html.push('<span class="cf-breadcrumb-separator" aria-hidden="true">/</span>');
       const label = escapeHtml(item.label || '');
-      const nodeId = item.nodeId ? escapeHtml(item.nodeId) : '';
-      const path = item.path ? escapeHtml(item.path) : '';
       const currentClass = index === crumbs.length - 1 ? ' cf-breadcrumb-item-current' : '';
-      if (nodeId) {
-        const ariaCurrent = index === crumbs.length - 1 ? ' aria-current="page"' : '';
-        html.push(`<a href="#" class="cf-breadcrumb-item${currentClass}" data-current-file-node-id="${nodeId}" data-current-file-path="${path}"${ariaCurrent}>${label}</a>`);
-      } else {
-        html.push(`<span class="cf-breadcrumb-item cf-breadcrumb-item-static${currentClass}">${label}</span>`);
-      }
+      const ariaCurrent = index === crumbs.length - 1 ? ' aria-current="page"' : '';
+      html.push(`<span class="cf-breadcrumb-item cf-breadcrumb-item-static${currentClass}"${ariaCurrent}>${label}</span>`);
     });
     return `<span class="cf-breadcrumb" aria-label="Current file location">${html.join('')}</span>`;
   };
@@ -2240,14 +2779,6 @@ document.addEventListener('DOMContentLoaded', () => {
       .filter(Boolean)
       .join('/');
     mainPieces.push(renderCurrentFileBreadcrumb(currentFileInfo.breadcrumb, path));
-    if (statusLabel) {
-      mainPieces.push('<span aria-hidden="true">—</span>');
-      mainPieces.push(`<span class="cf-status">${escapeHtml(statusLabel)}</span>`);
-    }
-    const mainHtml = `<span class="cf-line-main">${mainPieces.join(' ')}</span>`;
-
-    const metaPieces = [];
-    if (meta) metaPieces.push(`<span class="cf-remote">${escapeHtml(meta)}</span>`);
     let draftLabel = '';
     if (draft && draft.hasContent) {
       if (Number.isFinite(draft.savedAt)) {
@@ -2265,10 +2796,12 @@ document.addEventListener('DOMContentLoaded', () => {
           : t('editor.currentFile.draft.available');
       }
       if (!draftLabel) draftLabel = '';
-      metaPieces.push(`<span class="cf-draft">${draftLabel}</span>`);
+      mainPieces.push('<span class="cf-inline-separator" aria-hidden="true">·</span>');
+      mainPieces.push(`<span class="cf-draft">${draftLabel}</span>`);
     }
-    const metaHtml = metaPieces.length ? `<span class="cf-line-meta">${metaPieces.join('<span aria-hidden="true">·</span>')}</span>` : '';
-    el.innerHTML = `${mainHtml}${metaHtml}`;
+    const mainHtml = `<span class="cf-line-main">${mainPieces.join('')}</span>`;
+
+    el.innerHTML = mainHtml;
     bindCurrentFileBreadcrumbEvents(el);
 
     const tooltipParts = [breadcrumbLabel, path && path !== breadcrumbLabel ? path : '', statusLabel, meta, draftLabel]
@@ -2293,6 +2826,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const assignCurrentFileLabel = (input) => {
     currentFileInfo = normalizeCurrentFilePayload(input);
     setFrontMatterVisible(currentFileInfo.source !== 'tabs');
+    setTabsMetadataVisible(currentFileInfo.source === 'tabs');
     previewAssetCurrentPath = normalizePreviewPath(currentFileInfo.path || '');
     renderCurrentFileIndicator();
     refreshPreviewAssetOverrides();
@@ -2322,25 +2856,53 @@ document.addEventListener('DOMContentLoaded', () => {
   if (imageButton) {
     imageButton.addEventListener('click', (event) => {
       if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      pendingBlocksImageInsert = null;
       if (!getCurrentMarkdownPath()) {
         emitEditorToast('warn', 'Open a markdown file before inserting images.');
         return;
       }
-      if (imageInput) {
-        try { imageInput.click(); }
-        catch (_) {
-          try { imageInput.dispatchEvent(new MouseEvent('click', { bubbles: true })); }
-          catch (__) {}
-        }
-      }
+      openImageInputPicker();
     });
   }
 
   if (imageInput) {
     imageInput.addEventListener('change', () => {
       const files = imageInput.files;
+      const blockInsert = pendingBlocksImageInsert;
+      pendingBlocksImageInsert = null;
+      pendingImagePickerToken += 1;
       if (files && files.length) {
-        handleImageFiles(files, { source: 'picker' }).catch((err) => {
+        const replaceIndex = blockInsert && Number.isFinite(blockInsert.replaceIndex)
+          ? blockInsert.replaceIndex
+          : null;
+        const replaceBlockId = blockInsert && typeof blockInsert.replaceBlockId === 'string'
+          ? blockInsert.replaceBlockId
+          : null;
+        let insertIndex = blockInsert && Number.isFinite(blockInsert.index)
+          ? blockInsert.index
+          : null;
+        const replaceMarkdown = (replaceIndex != null || replaceBlockId)
+          && markdownBlocksEditor
+          && typeof markdownBlocksEditor.replaceImageBlock === 'function'
+          ? (relativePath) => {
+            const result = markdownBlocksEditor.replaceImageBlock(relativePath, { index: replaceIndex, blockId: replaceBlockId });
+            if (!result) return false;
+            return {};
+          }
+          : null;
+        const insertMarkdown = !replaceMarkdown && blockInsert && markdownBlocksEditor && typeof markdownBlocksEditor.insertImageBlock === 'function'
+          ? (relativePath, altText) => {
+            const result = markdownBlocksEditor.insertImageBlock(relativePath, altText, insertIndex);
+            if (result && Number.isFinite(result.index)) insertIndex = result.index + 1;
+            return {};
+          }
+          : null;
+        const markdownHandler = replaceMarkdown || insertMarkdown;
+        const imageFileOptions = markdownHandler
+          ? { source: 'picker', insertMarkdown: markdownHandler, singleImage: !!replaceMarkdown }
+          : { source: 'picker' };
+        if (replaceMarkdown) imageFileOptions.insertAbortToast = t('editor.toasts.imageReplaceTargetMissing');
+        handleImageFiles(files, imageFileOptions).catch((err) => {
           console.error('Image insertion failed', err);
         });
       }
@@ -2370,13 +2932,23 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  const applyMarkdownEditorView = (mode, opts = {}) => {
+    const nextView = normalizeMarkdownEditorView(mode);
+    switchView(nextView);
+    if (nextView === 'preview') renderPreview(getValue());
+    else if (nextView === 'blocks' && markdownBlocksEditor && typeof markdownBlocksEditor.requestLayout === 'function') {
+      try { markdownBlocksEditor.requestLayout(); } catch (_) {}
+    } else {
+      requestLayout();
+    }
+    if (opts.persist) persistMarkdownEditorView(nextView);
+  };
+
   // View toggle
   document.querySelectorAll('.vt-btn[data-view]').forEach(a => {
     a.addEventListener('click', (e) => {
       e.preventDefault();
-      const mode = a.dataset.view;
-      switchView(mode);
-      if (mode === 'preview') renderPreview(getValue());
+      applyMarkdownEditorView(a.dataset.view, { persist: true });
     });
   });
 
@@ -2389,18 +2961,25 @@ document.addEventListener('DOMContentLoaded', () => {
         else if (ta && typeof ta.focus === 'function') ta.focus();
       } catch (_) {}
     },
-    setView: (mode) => {
-      switchView(mode === 'preview' ? 'preview' : 'edit');
-      if (mode === 'preview') renderPreview(getValue());
-      else requestLayout();
+    setView: (mode, opts = {}) => applyMarkdownEditorView(mode, opts),
+    restorePersistedView: (opts = {}) => applyMarkdownEditorView(readPersistedMarkdownEditorView(), opts),
+    getView: () => {
+      const viewToggle = document.querySelector('.view-toggle');
+      return normalizeMarkdownEditorView(viewToggle && viewToggle.dataset ? viewToggle.dataset.view : 'edit');
     },
     setBaseDir: (dir) => setBaseDir(dir),
     setCurrentFileLabel: (label) => assignCurrentFileLabel(label),
     setFrontMatterVisible: (visible) => setFrontMatterVisible(visible),
+    setTabsMetadata: (value, opts = {}) => tabsMetadataManager && tabsMetadataManager.setValue(value, opts),
     onChange: (fn) => {
       if (typeof fn !== 'function') return () => {};
       changeListeners.add(fn);
       return () => { changeListeners.delete(fn); };
+    },
+    onTabsMetadataChange: (fn) => {
+      if (typeof fn !== 'function') return () => {};
+      tabsMetadataChangeListeners.add(fn);
+      return () => { tabsMetadataChangeListeners.delete(fn); };
     },
     refreshPreview: () => { renderPreview(getValue()); },
     requestLayout: () => { requestLayout(); },

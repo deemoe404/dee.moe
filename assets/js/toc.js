@@ -1,4 +1,4 @@
-import { t } from './i18n.js?v=20260430sync';
+import { t } from './i18n.js?v=20260505welcome';
 
 // Anchors and Table of Contents enhancements
 export function setupAnchors() {
@@ -34,6 +34,10 @@ export function setupAnchors() {
 export function setupTOC() {
   const tocRoot = document.getElementById('tocview');
   if (!tocRoot) return;
+  if (typeof tocRoot.enhance === 'function') {
+    try { tocRoot.enhance(); } catch (_) {}
+    return;
+  }
 
   const list = tocRoot.querySelector('ul');
   if (!list) return;

@@ -12,7 +12,7 @@
 import { parseFrontMatter } from './content.js';
 import { getContentRoot } from './utils.js';
 import { fetchConfigWithYamlFallback } from './yaml.js';
-import enTranslations, { languageMeta as enLanguageMeta } from '../i18n/en.js?v=20260430sync';
+import enTranslations, { languageMeta as enLanguageMeta } from '../i18n/en.js?v=20260505welcome';
 
 // Content fetch cache modes are normalized by cache-control.js.
 
@@ -778,6 +778,11 @@ export async function loadLangJson(basePath, baseName) {
 // Update static DOM bits outside main render cycle (sidebar card, search placeholder)
 function applyStaticTranslations() {
   // Search placeholder
+  const search = document.querySelector('nano-search');
+  if (search && typeof search.setPlaceholder === 'function') {
+    search.setPlaceholder(t('sidebar.searchPlaceholder'));
+    return;
+  }
   const input = document.getElementById('searchInput');
   if (input) input.setAttribute('placeholder', t('sidebar.searchPlaceholder'));
 }

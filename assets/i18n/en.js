@@ -38,7 +38,14 @@ const translations = {
       aiFlagLabel: 'AI-assisted',
       aiFlagTooltip: 'AI-assisted: generated or edited with an LLM',
       draftBadge: 'Draft',
-      draftNotice: 'This post is a draft and may change.'
+      draftNotice: 'This post is a draft and may change.',
+      protectedBadge: 'Protected',
+      protectedExcerpt: 'Protected article',
+      protectedPostBody: 'This article is encrypted. Enter its password to read it.',
+      protectedPostPasswordLabel: 'Password',
+      protectedPostUnlock: 'Unlock',
+      protectedPostUnlocking: 'Unlocking…',
+      protectedPostWrongPassword: 'That password did not unlock this article.'
     },
     code: {
       copy: 'Copy',
@@ -49,6 +56,8 @@ const translations = {
     errors: {
       postNotFoundTitle: 'Post not found',
       postNotFoundBody: 'The requested post could not be loaded.',
+      protectedPostInvalidTitle: 'Protected post unavailable',
+      protectedPostInvalidBody: 'This protected article has invalid encryption metadata.',
       pageUnavailableTitle: 'Page unavailable',
       pageUnavailableBody: 'Could not load this tab.',
       indexUnavailableBody: 'Could not load the post index. Check network or repository contents.'
@@ -76,7 +85,7 @@ const translations = {
       search: (q) => `Search: ${q}`
     },
     editor: {
-      pageTitle: 'Markdown Editor - NanoSite',
+      pageTitle: 'Markdown Editor - Press',
       languageLabel: 'Language',
       verifying: 'Verifying…',
       verify: 'Verify',
@@ -124,10 +133,12 @@ const translations = {
         },
         system: 'System',
         siteSettings: 'Site Settings',
-        nanoSiteUpdates: 'NanoSite Updates',
+        themes: 'Themes',
+        pressUpdates: 'Press Updates',
         sync: 'Publish',
         siteSettingsMeta: 'Edit site.yaml settings.',
-        systemUpdatesMeta: 'Review and apply NanoSite updates.',
+        themesMeta: 'Theme packs.',
+        systemUpdatesMeta: 'Review and apply Press updates.',
         syncMeta: 'Publish local changes to GitHub.',
         editorLanguage: 'Editor language',
         editorLanguageMeta: 'Change the editor interface language.',
@@ -172,8 +183,8 @@ const translations = {
       },
       welcome: {
         kicker: 'Getting started',
-        title: 'Welcome to NanoSite',
-        meta: 'Write content, check the site basics, and publish when everything looks ready.',
+        title: 'Welcome to Press',
+        meta: 'Where knowledge becomes pages.',
         stepsTitle: 'Start with three steps',
         step1Number: 'Step 1',
         step1Title: 'Set up the site',
@@ -188,13 +199,13 @@ const translations = {
         step3Title: 'Publish when ready',
         step3Detail: 'Saving keeps drafts local. Publish sends the changes you choose to GitHub.',
         step3Button: 'Open Publish',
-        updatesTitle: 'NanoSite Updates',
+        updatesTitle: 'Press Updates',
         updatesBody: 'Check editor and runtime updates without changing your articles, pages, or site settings.',
         updatesButton: 'Check updates',
         faqTitle: 'When a word looks unfamiliar',
         faqIntro: 'You do not need to read everything now. Open a question only when it helps.',
-        faqNanoSiteQuestion: 'What is NanoSite?',
-        faqNanoSiteAnswer: 'NanoSite turns Markdown files into a static website that can be hosted on GitHub Pages.',
+        faqPressQuestion: 'What is Press?',
+        faqPressAnswer: 'Where knowledge becomes pages.',
         faqMarkdownQuestion: 'What is Markdown?',
         faqMarkdownAnswer: 'Markdown is a simple way to write headings, links, lists, images, and paragraphs as plain text.',
         faqArticlesPagesQuestion: 'What is the difference between Articles and Pages?',
@@ -203,7 +214,7 @@ const translations = {
         faqFrontMatterAnswer: 'Front matter is the small settings block for a page or article, such as title, date, tags, excerpt, and cover image.',
         faqPublishQuestion: 'How do local edits and Publish work?',
         faqPublishAnswer: 'Saving keeps drafts on this computer. Publish sends the changes you choose to GitHub.',
-        faqUpdatesQuestion: 'What do NanoSite Updates change?',
+        faqUpdatesQuestion: 'What do Press Updates change?',
         faqUpdatesAnswer: 'System Updates refresh editor and runtime files. They do not overwrite your articles, pages, or site settings.'
       },
       status: {
@@ -217,22 +228,27 @@ const translations = {
         clean: 'No local changes'
       },
       systemUpdates: {
-        tabLabel: 'NanoSite Updates',
-        title: 'NanoSite Updates',
+        tabLabel: 'Press Updates',
+        title: 'Press Updates',
         openDownload: 'Download release ZIP',
         downloadAssetLink: ({ name }) => `Download ${name}`,
         openReleasePage: 'View release on GitHub',
+        downloadAndCheck: 'Download and check',
         selectArchive: 'Select downloaded ZIP',
         filesHeading: 'Pending system files',
         releaseNotes: 'Release notes',
         noNotes: 'This release does not include additional notes.',
+        currentVersionLabel: ({ version }) => `Current Press: ${version}`,
+        targetVersionLabel: ({ version }) => `Target Press: ${version}`,
+        unknownVersion: 'unknown',
         latestLabel: ({ name, tag }) => `Latest release: ${name}${tag ? ` (${tag})` : ''}`,
         publishedLabel: ({ date }) => `Published on ${date}`,
         assetLabel: ({ name, size }) => `Asset: ${name} (${size})`,
         assetWithHash: ({ name, size, hash }) => `Asset: ${name} (${size}) — SHA-256 ${hash}`,
-        noAsset: 'No NanoSite system update package was attached to this release.',
+        noAsset: 'No Press system update package was attached to this release.',
         status: {
-          idle: 'Download the latest release ZIP, then select it to check for updates.',
+          idle: 'Download and check the latest release, or select a downloaded ZIP.',
+          downloading: 'Downloading latest release ZIP…',
           reading: 'Reading archive…',
           verifying: 'Verifying archive…',
           noChanges: 'System files are up to date.',
@@ -243,7 +259,9 @@ const translations = {
           releaseFetch: 'Unable to load latest release information.',
           releaseRateLimited: 'GitHub API is rate limited. Try again later, or manually select a downloaded ZIP.',
           emptyFile: 'The selected file is empty.',
-          invalidArchive: 'The selected ZIP could not be read as a NanoSite release.',
+          invalidArchive: 'The selected ZIP could not be read as a Press release.',
+          downloadFailed: 'Unable to download the latest system update package. Select a downloaded ZIP instead.',
+          upgradeBlocked: ({ current, target, ranges }) => `Cannot update from ${current} to ${target}. Apply an intermediate Press release first. Supported source range: ${ranges}.`,
           sizeMismatch: ({ expected, actual }) => `The selected archive size (${actual}) does not match the release asset (${expected}).`,
           digestMismatch: 'The selected archive SHA-256 does not match the release asset.',
           generic: 'System update failed. Please try again.'
@@ -254,7 +272,13 @@ const translations = {
         },
         summary: {
           added: 'new system file',
-          modified: 'updated system file'
+          modified: 'updated system file',
+          deleted: 'deleted system file'
+        }
+      },
+      themeManager: {
+        status: {
+          idle: 'No theme changes are staged.'
         }
       },
       currentFile: {
@@ -321,6 +345,7 @@ const translations = {
         viewEdit: 'Editor',
         viewBlocks: 'Blocks',
         viewPreview: 'Preview',
+        protection: 'Protection',
         save: 'Save',
         discard: 'Discard',
         wrapAria: 'Wrap setting',
@@ -343,6 +368,17 @@ const translations = {
         markdownOpenBeforeInsert: 'Open a markdown file before inserting images.',
         assetAttached: ({ label }) => `Attached ${label}`,
         imageReplaceTargetMissing: 'The image block no longer exists. Select an image block and try again.',
+        imageDeleteTargetMissing: 'The image block no longer exists. Select an image block and try again.',
+        assetDeleteUnsupported: 'Only local assets next to the current Markdown file can be deleted.',
+        assetDeleteShared: 'This image resource is still referenced by another known Markdown document or another image block.',
+        assetDeleteRejected: 'This image resource cannot be deleted yet.',
+        assetPendingRemoved: ({ label }) => `Removed pending image asset ${label}.`,
+        assetDeleteStaged: ({ label }) => `Staged ${label} for deletion.`,
+        repositoryDeletionDraftsPending: 'Unable to delete files while local drafts are still pending.',
+        repositoryDeletionDraftsBlocked: ({ sample, remaining }) => {
+          const suffix = remaining ? `, +${remaining} more` : '';
+          return `Publish blocked because deleted files still have local drafts: ${sample}${suffix}. Restore, publish, or discard those drafts before deleting the files.`;
+        },
         noPendingChanges: 'No pending changes to commit.',
         siteWaitStopped: 'Stopped waiting for the live site. Your commit is already on GitHub, but it may take a few minutes to appear.',
         siteWaitTimedOut: 'Committed files to GitHub, but the live site did not update in time. Check the deploy status manually.',
@@ -373,6 +409,7 @@ const translations = {
         paragraph: 'Paragraph',
         heading: 'Heading',
         image: 'Image',
+        table: 'Table',
         list: 'List',
         quote: 'Quote',
         code: 'Code',
@@ -391,9 +428,19 @@ const translations = {
         imageAlt: 'Alt text',
         imagePath: 'Image path',
         replaceImage: 'Replace image',
+        deleteImageResource: 'Delete resource',
         unordered: 'Bulleted',
         ordered: 'Numbered',
         task: 'Checklist',
+        tableAddRow: 'Add row',
+        tableAddColumn: 'Add column',
+        tableDeleteRow: 'Delete row',
+        tableDeleteColumn: 'Delete column',
+        tableAlignment: 'Column alignment',
+        tableAlignDefault: 'Default',
+        tableAlignLeft: 'Left',
+        tableAlignCenter: 'Center',
+        tableAlignRight: 'Right',
         codeLanguage: 'Language',
         cardLabel: 'Card label',
         cardLocation: 'post/path/file.md',
@@ -417,7 +464,7 @@ const translations = {
           frontMatter: 'Front matter is preserved as raw Markdown so document metadata stays intact.',
           unclosedFence: 'This fenced code block is incomplete, so it is kept as Markdown source.',
           callout: 'This block uses callout-style Markdown that the visual block editor does not edit directly.',
-          table: 'This table-like Markdown is kept as source because the visual block editor does not support table editing yet.',
+          table: 'This table-like Markdown is kept as source because it is not a supported standard pipe table.',
           indentedList: 'This list starts with indentation, so it is kept as source to avoid changing whether it means a nested list or code-like Markdown.',
           mixedList: 'This list starts from an unsupported mixed indentation, so it is kept as Markdown source.',
           image: 'This paragraph contains inline image Markdown, so it is kept as source to avoid changing the mixed content.',
@@ -458,7 +505,7 @@ const translations = {
           insertCard: 'Place the caret on an empty line, then click to insert an article card. If no articles appear, wait for the index to load or add entries in index.yaml.'
         }
       },
-      editorPlaceholder: '# Hello NanoSite\n\nStart typing Markdown…',
+      editorPlaceholder: '# Hello Press\n\nStart typing Markdown…',
       editorTextareaAria: 'Markdown source',
       empty: {
         title: 'No editor is currently open',
@@ -546,6 +593,10 @@ const translations = {
               title: 'Theme',
               description: 'Pick default theme settings applied to visitors.'
             },
+            comments: {
+              title: 'Comments',
+              description: 'Configure Press Annotate comments backed by Ekily Connect.'
+            },
             repo: {
               title: 'Repository',
               description: 'Configure GitHub details for commits and issue links.'
@@ -599,6 +650,12 @@ const translations = {
             themeOverrideHelp: 'Force the selected theme even if visitors change it.',
             repo: 'GitHub repository',
             repoHelp: 'Required for commits, push to GitHub, and issue links.',
+            annotateEnabled: 'Article comments',
+            annotateEnabledHelp: 'Enable comments below article pages.',
+            annotateConnectBaseUrl: 'Connect URL',
+            annotateConnectBaseUrlHelp: 'Base URL for the Ekily Connect deployment that serves comment APIs.',
+            annotateDiscussionCategory: 'Discussion category',
+            annotateDiscussionCategoryHelp: 'GitHub Discussions category used for article comment threads.',
             assetLargeImage: 'Warn about large images',
             assetLargeImageHelp: 'Show a warning when attached images exceed the threshold.',
             assetLargeImageThreshold: 'Large image threshold (KB)',
@@ -765,6 +822,25 @@ const translations = {
           modal: {
             title: 'Synchronize with GitHub',
             subtitle: 'Provide a Fine-grained Personal Access Token with repository contents access.',
+            connectTitle: 'Ekily Connect publishing',
+            connectHelp: ({ baseUrl }) => `GitHub App publishing is configured through ${baseUrl}.`,
+            connectReady: 'Sign in with GitHub when publishing. No personal access token is needed.',
+            connectConnected: 'GitHub sign-in is ready for this browser session.',
+            publishMethodConnect: 'Connect',
+            publishMethodPat: 'Personal token',
+            connectBaseUrlLabel: 'Connect URL',
+            connectBaseUrlHelp: 'Choose a built-in Connect remote or enter a compatible deployment URL. This setting is stored only in this browser.',
+            connectInvalidUrl: 'Enter a valid Connect URL. HTTPS is required unless the host is localhost.',
+            connectFallback: 'Use a Fine-grained Personal Access Token instead',
+            connectFallbackActive: 'Fine-grained token fallback is active for this publish.',
+            connectMissing: 'Connect publishing is not configured for this site.',
+            connectAuthorizing: 'Authorizing with Connect…',
+            connectPublishing: 'Creating commit through Connect…',
+            connectNetworkError: 'Could not reach Connect. Check your connection.',
+            connectPublishFailed: 'Connect publish failed.',
+            connectAuthorizationFailed: 'Connect authorization failed.',
+            connectAuthorizationCanceled: 'Connect authorization was canceled.',
+            connectAuthorizationTimedOut: 'Connect authorization timed out. Try signing in again.',
             summaryTitle: 'The following files will be committed:',
             summaryTextFilesTitle: 'Content files',
             summarySystemFilesTitle: 'System files',
@@ -856,6 +932,45 @@ const translations = {
               reload: 'Discard local markdown changes (remote snapshot will be reloaded).'
             }
           },
+          protection: {
+            label: 'Protection',
+            labelProtected: 'Protected',
+            labelUnprotected: 'Protection',
+            tooltipNoFile: 'Open a markdown file before changing protection.',
+            tooltipProtected: 'This article is encrypted. Change the password or disable protection.',
+            tooltipUnprotected: 'Encrypt this article with a per-article password.',
+            dialogTitle: 'Article password',
+            dialogMessage: 'Enter the article password to continue.',
+            passwordLabel: 'Password',
+            confirmPasswordLabel: 'Confirm password',
+            passwordRequired: 'Password is required to encrypt this article.',
+            passwordRequiredOpen: 'Password is required to open this protected article.',
+            passwordMismatch: 'Passwords do not match.',
+            openTitle: 'Unlock protected article',
+            openMessage: 'Enter the article password before loading it into the editor.',
+            draftTitle: 'Unlock protected draft',
+            draftMessage: 'Enter the article password to restore this encrypted local draft.',
+            passwordTitle: 'Keep article encrypted',
+            passwordMessage: 'Enter the article password so the draft can be saved encrypted.',
+            enableTitle: 'Protect article',
+            enableMessage: 'Set a password. Press encrypts the article body before saving or publishing.',
+            changeTitle: 'Change article password',
+            changeMessage: 'Set a new password. Existing local plaintext stays only in this open page.',
+            changePrompt: 'This article is protected. Change its password?',
+            disableConfirm: 'Disable protection and publish this article as plaintext?',
+            enable: 'Enable protection',
+            unlock: 'Unlock',
+            keepEncrypted: 'Keep encrypted',
+            changePassword: 'Change password',
+            keepProtection: 'Keep protection',
+            disable: 'Disable protection',
+            enabledToast: 'Article protection enabled.',
+            disabledToast: 'Article protection disabled.',
+            passwordChangedToast: 'Article password changed.',
+            unlockFailed: 'Unable to unlock with that password.',
+            invalidEnvelope: 'Protected article envelope is invalid.',
+            prepareFailed: 'Failed to prepare encrypted markdown.'
+          },
           draftIndicator: {
             conflict: 'Local draft conflicts with remote file.',
             dirty: 'Unsaved changes pending in editor.',
@@ -926,7 +1041,7 @@ const translations = {
           readFailed: 'Failed to read site.yaml.'
         }
       },
-      footerNote: 'Crafted with ❤️ using <a href="https://deemoe404.github.io/NanoSite/" target="_blank" rel="noopener">NanoSite</a>. Stay inspired and keep creating.'
+      footerNote: 'Crafted with ❤️ using <a href="https://ekilyhq.github.io/Press/" target="_blank" rel="noopener">Press</a>. Stay inspired and keep creating.'
     }
   }
 

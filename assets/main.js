@@ -1,12 +1,18 @@
 import { configureFetchCachePolicy } from './js/cache-control.js';
 import './js/components.js';
-import { mdParse } from './js/markdown.js';
-import { setupAnchors, setupTOC } from './js/toc.js';
-import { applySavedTheme, bindThemeToggle, bindThemePackPicker, mountThemeControls, refreshLanguageSelector, applyThemeConfig, bindPostEditor } from './js/theme.js';
-import { ensureThemeLayout } from './js/theme-layout.js';
+import { createContentModel } from './js/content-model.js';
+import {
+  decryptMarkdownDocument,
+  parseEncryptedMarkdownEnvelope,
+  stripEncryptedBodyForPublicUse
+} from './js/encrypted-content.js?v=press-system-v3.4.16';
+import { setupAnchors, setupTOC } from './js/toc.js?v=press-system-v3.4.16';
+import { applySavedTheme, bindThemeToggle, bindThemePackPicker, mountThemeControls, refreshLanguageSelector, applyThemeConfig, bindPostEditor } from './js/theme.js?v=press-system-v3.4.16';
+import { createThemeI18nContext, ensureThemeLayout, getThemeApiHandler, getThemeLayoutContext, getThemeRegion } from './js/theme-layout.js?v=press-system-v3.4.16';
 import { setupSearch } from './js/search.js';
-import { extractExcerpt, computeReadTime } from './js/content.js';
-import { getQueryVariable, setDocTitle, setBaseSiteTitle, cardImageSrc, fallbackCover, renderTags, slugifyTab, formatDisplayDate, isModifiedClick, getContentRoot, sanitizeImageUrl, sanitizeUrl } from './js/utils.js';
+import { extractExcerpt, computeReadTime, parseFrontMatter } from './js/content.js';
+import { getContentRoot, setSafeHtml } from './js/safe-html.js?v=press-system-v3.4.16';
+import { getQueryVariable, setDocTitle, setBaseSiteTitle, slugifyTab, isModifiedClick } from './js/utils.js';
 import {
   initI18n,
   t,
@@ -17,23 +23,223 @@ import {
   getCurrentLang,
   normalizeLangKey,
   POSTS_METADATA_READY_EVENT
-} from './js/i18n.js';
-import { updateSEO, extractSEOFromMarkdown } from './js/seo.js';
-import { initErrorReporter, setReporterContext, showErrorOverlay } from './js/errors.js';
-import { initSyntaxHighlighting } from './js/syntax-highlight.js';
+} from './js/i18n.js?v=press-system-v3.4.16';
+import { updateSEO, extractSEOFromMarkdown } from './js/seo.js?v=press-system-v3.4.16';
+import { initErrorReporter, setReporterContext, showErrorOverlay } from './js/errors.js?v=press-system-v3.4.16';
 import { fetchConfigWithYamlFallback } from './js/yaml.js';
 import { applyMasonry, updateMasonryItem, calcAndSetSpan, toPx, debounce } from './js/masonry.js';
-import { aggregateTags, renderTagSidebar, setupTagTooltips } from './js/tags.js';
-import { renderPostNav } from './js/post-nav.js';
+import { aggregateTags, renderTagSidebar, setupTagTooltips } from './js/tags.js?v=press-system-v3.4.16';
+import { renderPostNav } from './js/post-nav.js?v=press-system-v3.4.16';
 import { getArticleTitleFromMain } from './js/dom-utils.js';
 import { applyLangHints } from './js/typography.js';
 
 import { applyLazyLoadingIn, hydratePostImages, hydratePostVideos, hydrateCardCovers } from './js/post-render.js';
-import { hydrateInternalLinkCards } from './js/link-cards.js';
 
 // Lightweight content fetch helper; cache mode is normalized by cache-control.js.
 const getFile = (filename) => fetch(String(filename || ''), { cache: 'no-store' })
   .then(resp => { if (!resp.ok) throw new Error(`HTTP ${resp.status}`); return resp.text(); });
+
+function setBootProgress(value) {
+  try {
+    const progress = document.getElementById('press-boot-progress');
+    if (!progress) return;
+    const numeric = Number(value);
+    const clamped = Number.isFinite(numeric) ? Math.max(0.08, Math.min(1, numeric)) : 0.08;
+    progress.style.setProperty('--press-boot-progress-value', String(clamped));
+  } catch (_) {}
+}
+
+function clearBootProgress() {
+  try {
+    const progress = document.getElementById('press-boot-progress');
+    if (progress) progress.remove();
+    const style = document.getElementById('press-boot-progress-style');
+    if (style) style.remove();
+  } catch (_) {}
+}
+
+setBootProgress(0.12);
+
+let markdownModulePromise = null;
+let syntaxHighlightModulePromise = null;
+let mathRenderModulePromise = null;
+let annotateModulePromise = null;
+let linkCardsModulePromise = null;
+
+function cacheDynamicImport(importer, getCached, setCached) {
+  let promise = getCached();
+  if (!promise) {
+    promise = importer().catch((err) => {
+      setCached(null);
+      throw err;
+    });
+    setCached(promise);
+  }
+  return promise;
+}
+
+function loadMarkdownModule() {
+  return cacheDynamicImport(
+    () => import('./js/markdown.js?v=press-system-v3.4.16'),
+    () => markdownModulePromise,
+    (promise) => { markdownModulePromise = promise; }
+  );
+}
+
+function loadSyntaxHighlightModule() {
+  return cacheDynamicImport(
+    () => import('./js/syntax-highlight.js?v=press-system-v3.4.16'),
+    () => syntaxHighlightModulePromise,
+    (promise) => { syntaxHighlightModulePromise = promise; }
+  );
+}
+
+function loadMathRenderModule() {
+  return cacheDynamicImport(
+    () => import('./js/math-render.js?v=press-system-v3.4.16'),
+    () => mathRenderModulePromise,
+    (promise) => { mathRenderModulePromise = promise; }
+  );
+}
+
+function loadAnnotateModule() {
+  return cacheDynamicImport(
+    () => import('./js/annotate.js?v=press-system-v3.4.16'),
+    () => annotateModulePromise,
+    (promise) => { annotateModulePromise = promise; }
+  );
+}
+
+function loadLinkCardsModule() {
+  return cacheDynamicImport(
+    () => import('./js/link-cards.js?v=press-system-v3.4.16'),
+    () => linkCardsModulePromise,
+    (promise) => { linkCardsModulePromise = promise; }
+  );
+}
+
+function queryScopeHas(scope, selector) {
+  try {
+    return !!(scope && typeof scope.querySelector === 'function' && scope.querySelector(selector));
+  } catch (_) {
+    return false;
+  }
+}
+
+function hasInternalLinkCardCandidates(scope) {
+  try {
+    if (!scope || typeof scope.querySelectorAll !== 'function') return false;
+    const anchors = Array.from(scope.querySelectorAll('a[href]'));
+    return anchors.some((anchor) => {
+      const href = String(anchor.getAttribute('href') || '').trim();
+      if (!href || href.startsWith('#') || /^(mailto:|javascript:)/i.test(href)) return false;
+      const startsWithQuery = href.startsWith('?');
+      let url;
+      try {
+        url = new URL(href, window.location.href);
+      } catch (_) {
+        return false;
+      }
+      if (!startsWithQuery && url.origin !== window.location.origin) return false;
+      if (!url.searchParams.get('id')) return false;
+      const titleAttr = String(anchor.getAttribute('title') || '').trim();
+      if (/\b(card|preview)\b/i.test(titleAttr) || anchor.hasAttribute('data-card') || anchor.classList.contains('card')) return true;
+      const parent = anchor.parentElement;
+      if (!parent || !['P', 'LI', 'DIV'].includes(parent.tagName)) return false;
+      const nodes = Array.from(parent.childNodes || []);
+      return nodes.every(node => node === anchor || (node.nodeType === Node.TEXT_NODE && !String(node.textContent || '').trim()));
+    });
+  } catch (_) {
+    return false;
+  }
+}
+
+async function initSyntaxHighlighting(root = document) {
+  try {
+    const scope = root && typeof root.querySelectorAll === 'function' ? root : document;
+    if (!queryScopeHas(scope, 'pre code')) return;
+    const mod = await loadSyntaxHighlightModule();
+    if (mod && typeof mod.initSyntaxHighlighting === 'function') mod.initSyntaxHighlighting(scope);
+  } catch (_) {}
+}
+
+async function renderPressMath(root = document) {
+  try {
+    const scope = root && typeof root.querySelectorAll === 'function' ? root : document;
+    if (!queryScopeHas(scope, '.press-math[data-tex]')) return;
+    const mod = await loadMathRenderModule();
+    if (mod && typeof mod.renderPressMath === 'function') mod.renderPressMath(scope);
+  } catch (_) {}
+}
+
+async function hydrateInternalLinkCards(container, options = {}) {
+  try {
+    const scope = container && typeof container.querySelectorAll === 'function' ? container : document;
+    if (!hasInternalLinkCardCandidates(scope)) return;
+    const mod = await loadLinkCardsModule();
+    if (mod && typeof mod.hydrateInternalLinkCards === 'function') {
+      return mod.hydrateInternalLinkCards(container, options);
+    }
+  } catch (_) {}
+}
+
+const RAW_INDEX_METADATA_KEYS = new Set([
+  'tag',
+  'tags',
+  'image',
+  'date',
+  'excerpt',
+  'thumb',
+  'cover',
+  'title',
+  'readTime',
+  'readMinutes',
+  'minutes',
+  'version',
+  'versionLabel',
+  'versions',
+  'ai',
+  'aiGenerated',
+  'llm',
+  'draft',
+  'wip',
+  'unfinished',
+  'inprogress',
+  'protected',
+  'encryption'
+]);
+
+function getRawIndexVariantLocation(value) {
+  if (typeof value === 'string') return value.trim();
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return String(value.location || value.path || '').trim();
+  }
+  return '';
+}
+
+function pushRawIndexVariant(variants, lang, value) {
+  const location = getRawIndexVariantLocation(value);
+  if (!location) return;
+  variants.push({ lang, location });
+}
+
+function collectRawIndexVariants(entry, options = {}) {
+  const variants = [];
+  if (!entry || typeof entry !== 'object') return variants;
+  const reserved = options.reservedKeys || RAW_INDEX_METADATA_KEYS;
+  const allowLang = typeof options.allowLang === 'function' ? options.allowLang : null;
+  for (const [key, value] of Object.entries(entry)) {
+    if (reserved && reserved.has(key)) continue;
+    const lang = (key === 'location' || key === 'path') ? 'default' : normalizeLangKey(key);
+    if (allowLang && !allowLang(lang, key)) continue;
+    if (Array.isArray(value)) {
+      value.forEach(item => pushRawIndexVariant(variants, lang, item));
+    } else {
+      pushRawIndexVariant(variants, lang, value);
+    }
+  }
+  return variants;
+}
 
 let postsByLocationTitle = {};
 let tabsBySlug = {};
@@ -52,11 +258,12 @@ let PAGE_SIZE = 8;
 let __activePostRequestId = 0;
 // Track last route to harmonize scroll behavior on back/forward
 let __lastRouteKey = '';
-const SITE_VIEW_STATE_KEY = 'ns_site_view_state_v1';
+const SITE_VIEW_STATE_KEY = 'press_site_view_state_v1';
 const SITE_VIEW_STATE_VERSION = 1;
 const SITE_SCROLL_SAVE_DELAY = 140;
 let siteScrollSaveTimer = 0;
 let siteViewStateBound = false;
+const protectedPostUnlockCache = new Map();
 
 // Compute a simple route key to help unify scroll behavior across navigations
 function getRouteKeyFromUrl(urlLike) {
@@ -133,11 +340,11 @@ function getFallbackScrollState() {
 }
 
 function getSiteScrollState() {
-  const fromHook = callThemeHook('getScrollState', { document, window });
-  if (fromHook && typeof fromHook === 'object') {
+  const fromEffect = callThemeEffect('getScrollState', { document, window });
+  if (fromEffect && typeof fromEffect === 'object') {
     return {
-      top: Math.max(0, Math.round(Number(fromHook.top) || 0)),
-      left: Math.max(0, Math.round(Number(fromHook.left) || 0))
+      top: Math.max(0, Math.round(Number(fromEffect.top) || 0)),
+      left: Math.max(0, Math.round(Number(fromEffect.left) || 0))
     };
   }
   return getFallbackScrollState();
@@ -147,7 +354,7 @@ function restoreSiteScrollState(state) {
   if (!state || typeof state !== 'object') return false;
   const top = Math.max(0, Math.round(Number(state.top) || 0));
   const left = Math.max(0, Math.round(Number(state.left) || 0));
-  const handled = callThemeHook('restoreScrollState', { top, left, document, window });
+  const handled = callThemeEffect('restoreScrollState', { top, left, document, window });
   if (handled !== undefined) return !!handled;
   try {
     if (typeof window.scrollTo === 'function') {
@@ -253,18 +460,40 @@ function bindSiteViewStatePersistence() {
   } catch (_) {}
 }
 
-function getThemeHook(name) {
+function getThemeEffectHandler(name) {
   try {
-    const hooks = (typeof window !== 'undefined') ? window.__ns_themeHooks : null;
-    const fn = hooks && hooks[name];
-    return typeof fn === 'function' ? fn : null;
+    const apiHandler = getThemeApiHandler(name);
+    if (typeof apiHandler === 'function') return apiHandler;
+    return null;
   } catch (_) { return null; }
 }
 
-function callThemeHook(name, ...args) {
-  const fn = getThemeHook(name);
+function isThemeDevMode() {
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    if (params.get('themeDev') === '1' || params.has('themeDev')) return true;
+  } catch (_) {}
+  try {
+    if (window.__press_themeDevMode === true) return true;
+  } catch (_) {}
+  try {
+    return window.localStorage && window.localStorage.getItem('press_theme_dev_mode') === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+function callThemeEffect(name, ...args) {
+  const fn = getThemeEffectHandler(name);
   if (!fn) return undefined;
-  try { return fn(...args); } catch (_) { return undefined; }
+  try {
+    return fn(...args);
+  } catch (err) {
+    if (isThemeDevMode()) {
+      try { console.error(`[theme-dev] Theme effect "${name}" failed`, err); } catch (_) {}
+    }
+    return undefined;
+  }
 }
 
 function handlePostsMetadataReady(event) {
@@ -309,13 +538,13 @@ function handlePostsMetadataReady(event) {
   postsByLocationTitle = byLocation;
 
   try {
-    callThemeHook('handlePostsMetadataUpdate', {
+    callThemeEffect('handlePostsMetadataUpdate', {
       entries,
       lang: detail && detail.lang,
       document,
       window
     });
-  } catch (_) { /* ignore theme hook errors */ }
+  } catch (_) { /* ignore theme effect errors */ }
 
   const rawId = getQueryVariable('id');
   const tabParam = (getQueryVariable('tab') || '').toLowerCase();
@@ -341,17 +570,30 @@ function bindPostsMetadataListener() {
 }
 
 function getViewContainer(view, role) {
+  let fromEffect = null;
   try {
-    const fromHook = callThemeHook('getViewContainer', {
+    fromEffect = callThemeEffect('getViewContainer', {
       view,
       role,
       document,
       window
     });
-    return fromHook || null;
   } catch (_) {
-    return null;
+    fromEffect = null;
   }
+  if (fromEffect) return fromEffect;
+  const namesByRole = {
+    main: ['main', 'mainview'],
+    toc: ['toc', 'tocBox', 'tocview'],
+    sidebar: ['sidebar', 'rightColumn', 'utilities'],
+    content: ['content', 'main'],
+    container: ['container'],
+    search: ['search', 'searchInput', 'searchBox'],
+    nav: ['nav', 'tabsNav', 'navBox'],
+    tags: ['tags', 'tagBox', 'tagview', 'tagBand'],
+    footer: ['footer']
+  };
+  return getThemeRegion(namesByRole[role] || role);
 }
 
 function getViewContainers(view) {
@@ -364,17 +606,17 @@ function getViewContainers(view) {
     containerElement: null
   };
   try {
-    const hookResult = callThemeHook('resolveViewContainers', {
+    const effectResult = callThemeEffect('resolveViewContainers', {
       view,
       document,
       window
     });
-    if (hookResult && typeof hookResult === 'object') {
-      if (hookResult.mainElement) container.mainElement = hookResult.mainElement;
-      if (hookResult.tocElement) container.tocElement = hookResult.tocElement;
-      if (hookResult.sidebarElement) container.sidebarElement = hookResult.sidebarElement;
-      if (hookResult.contentElement) container.contentElement = hookResult.contentElement;
-      if (hookResult.containerElement) container.containerElement = hookResult.containerElement;
+    if (effectResult && typeof effectResult === 'object') {
+      if (effectResult.mainElement) container.mainElement = effectResult.mainElement;
+      if (effectResult.tocElement) container.tocElement = effectResult.tocElement;
+      if (effectResult.sidebarElement) container.sidebarElement = effectResult.sidebarElement;
+      if (effectResult.contentElement) container.contentElement = effectResult.contentElement;
+      if (effectResult.containerElement) container.containerElement = effectResult.containerElement;
     }
   } catch (_) {}
   if (!container.mainElement) container.mainElement = getViewContainer(view, 'main');
@@ -391,14 +633,14 @@ function smoothShow(el, options) {
   if (!el) return;
   const payload = { element: el, document, window };
   if (options && typeof options === 'object') Object.assign(payload, options);
-  callThemeHook('showElement', payload);
+  callThemeEffect('showElement', payload);
 }
 
 function smoothHide(el, onDone, options) {
   if (!el) { if (typeof onDone === 'function') { try { onDone(); } catch (_) {} } return; }
   const payload = { element: el, onDone, document, window };
   if (options && typeof options === 'object') Object.assign(payload, options);
-  const handled = callThemeHook('hideElement', payload);
+  const handled = callThemeEffect('hideElement', payload);
   if (!handled && typeof onDone === 'function') {
     try { onDone(); } catch (_) {}
   }
@@ -430,6 +672,19 @@ function postsEnabled() {
     if (siteConfig && typeof siteConfig.disableAllPosts === 'boolean') return !siteConfig.disableAllPosts;
   } catch (_) {}
   return true; // default: enabled
+}
+
+function isAnnotateConfigured(cfg = siteConfig) {
+  try {
+    const annotate = cfg && typeof cfg.annotate === 'object' && !Array.isArray(cfg.annotate) ? cfg.annotate : null;
+    if (!annotate) return false;
+    const enabled = annotate.enabled === true || ['true', '1', 'yes', 'y', 'on', 'enabled'].includes(String(annotate.enabled ?? '').trim().toLowerCase());
+    if (!enabled) return false;
+    const repo = cfg && typeof cfg.repo === 'object' && !Array.isArray(cfg.repo) ? cfg.repo : null;
+    return !!(String(annotate.connectBaseUrl || '').trim() && repo && String(repo.owner || '').trim() && String(repo.name || '').trim());
+  } catch (_) {
+    return false;
+  }
 }
 
 function resolveLandingSlug() {
@@ -468,8 +723,8 @@ function getHomeLabel() {
 }
 
 // Expose a minimal API that other modules can consult if needed
-try { window.__ns_get_home_slug = () => getHomeSlug(); } catch (_) {}
-try { window.__ns_posts_enabled = () => postsEnabled(); } catch (_) {}
+try { window.__press_get_home_slug = () => getHomeSlug(); } catch (_) {}
+try { window.__press_posts_enabled = () => postsEnabled(); } catch (_) {}
 async function loadSiteConfig() {
   try {
     // YAML only
@@ -479,7 +734,7 @@ async function loadSiteConfig() {
 
 function renderSiteLinks(cfg) {
   try {
-    callThemeHook('renderSiteLinks', {
+    callThemeEffect('renderSiteLinks', {
       config: cfg,
       document,
       window
@@ -489,7 +744,7 @@ function renderSiteLinks(cfg) {
 
 function renderSiteIdentity(cfg) {
   try {
-    callThemeHook('renderSiteIdentity', {
+    callThemeEffect('renderSiteIdentity', {
       config: cfg,
       document,
       window
@@ -501,7 +756,7 @@ function renderSiteIdentity(cfg) {
 // Load cover images sequentially to reduce bandwidth contention
 function updateLayoutLoadingState(view, isLoading, containers = null) {
   const ctx = containers || getViewContainers(view);
-  return callThemeHook('updateLayoutLoadingState', {
+  return callThemeEffect('updateLayoutLoadingState', {
     view,
     isLoading,
     contentElement: ctx.contentElement,
@@ -518,7 +773,7 @@ function renderPostTOCBlock({
   articleTitle,
   tocHtml
 } = {}) {
-  return callThemeHook('renderPostTOC', {
+  return callThemeEffect('renderPostTOC', {
     tocElement,
     articleTitle,
     tocHtml,
@@ -536,7 +791,7 @@ function renderErrorState(targetElement, {
   view,
   containers
 } = {}) {
-  return callThemeHook('renderErrorState', {
+  return callThemeEffect('renderErrorState', {
     targetElement,
     variant,
     title,
@@ -551,7 +806,7 @@ function renderErrorState(targetElement, {
 }
 
 function notifyThemeViewChange(view, context = {}) {
-  return callThemeHook('handleViewChange', {
+  return callThemeEffect('handleViewChange', {
     view,
     context,
     document,
@@ -564,7 +819,7 @@ function refreshTagSidebar({
   containers,
   postsIndex
 } = {}) {
-  callThemeHook('renderTagSidebar', {
+  callThemeEffect('renderTagSidebar', {
     view,
     containers,
     postsIndex: postsIndex === undefined ? postsIndexCache : postsIndex,
@@ -579,7 +834,7 @@ function refreshTagSidebar({
 }
 
 function initializeSyntaxHighlightingForView(view, { containers } = {}) {
-  const handled = callThemeHook('initializeSyntaxHighlighting', {
+  const handled = callThemeEffect('initializeSyntaxHighlighting', {
     view,
     containers,
     initSyntaxHighlighting,
@@ -591,8 +846,15 @@ function initializeSyntaxHighlightingForView(view, { containers } = {}) {
   }
 }
 
+function initializeMathForView(view, { containers } = {}) {
+  const scope = containers && typeof containers === 'object' ? containers : {};
+  const root = scope.mainElement || getViewContainer(view, 'main');
+  if (!root) return;
+  try { renderPressMath(root); } catch (_) {}
+}
+
 function resetTOCView(view, containers, { reason, immediate } = {}) {
-  const handled = callThemeHook('resetTOC', {
+  const handled = callThemeEffect('resetTOC', {
     view,
     containers,
     reason,
@@ -617,7 +879,7 @@ function resetTOCView(view, containers, { reason, immediate } = {}) {
 }
 
 function enhanceIndexLayout(params = {}) {
-  callThemeHook('enhanceIndexLayout', {
+  callThemeEffect('enhanceIndexLayout', {
     ...params,
     hydrateCardCovers,
     applyLazyLoadingIn,
@@ -637,13 +899,15 @@ function enhanceIndexLayout(params = {}) {
 // RenderOutdatedCard moved to ./js/templates.js
 
 function renderTabs(activeSlug, searchQuery) {
-  callThemeHook('renderTabs', {
+  callThemeEffect('renderTabs', {
     activeSlug,
     searchQuery,
     tabsBySlug,
     getHomeSlug: () => getHomeSlug(),
     getHomeLabel: () => getHomeLabel(),
     postsEnabled: () => postsEnabled(),
+    translate: t,
+    withLangParam,
     document,
     window
   });
@@ -651,7 +915,7 @@ function renderTabs(activeSlug, searchQuery) {
 
 // Render footer navigation: Home (All Posts) + custom tabs
 function renderFooterNav() {
-  callThemeHook('renderFooterNav', {
+  callThemeEffect('renderFooterNav', {
     tabsBySlug,
     getHomeSlug: () => getHomeSlug(),
     getHomeLabel: () => getHomeLabel(),
@@ -664,14 +928,243 @@ function renderFooterNav() {
   });
 }
 
-function displayPost(postname) {
+function createThemeRuntimeContext({
+  view = '',
+  containers = null,
+  content = null,
+  route = {}
+} = {}) {
+  const layout = getThemeLayoutContext();
+  return {
+    document,
+    window,
+    view,
+    route: {
+      key: getCurrentRouteKey(),
+      ...route
+    },
+    router: {
+      getRouteKey: getCurrentRouteKey,
+      withLangParam,
+      getQueryVariable,
+      navigate(href) {
+        try {
+          history.pushState({}, '', String(href || ''));
+          routeAndRender();
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+    },
+    i18n: createThemeI18nContext(),
+    content,
+    regions: layout && layout.regions,
+    containers,
+    utilities: {
+      getRegion: getThemeRegion,
+      renderPostNav,
+      hydratePostImages,
+      hydratePostVideos,
+      hydrateInternalLinkCards,
+      applyLazyLoadingIn,
+      applyLangHints,
+      renderPostTOC: (opts) => renderPostTOCBlock(opts),
+      renderTagSidebar,
+      setupAnchors,
+      setupTOC,
+      ensureAutoHeight,
+      getFile,
+      getContentRoot,
+      setSafeHtml
+    },
+    themeConfig: siteConfig,
+    manifest: layout && layout.manifest,
+    theme: layout && layout.theme
+  };
+}
+
+function getCachedProtectedMarkdown(postname, envelope) {
+  const key = String(postname || '');
+  if (!key || !envelope || !envelope.ciphertext) return '';
+  const cached = protectedPostUnlockCache.get(key);
+  if (!cached || cached.ciphertext !== envelope.ciphertext) return '';
+  return cached.markdown || '';
+}
+
+function cacheProtectedMarkdown(postname, envelope, markdown) {
+  const key = String(postname || '');
+  if (!key || !envelope || !envelope.ciphertext || !markdown) return;
+  protectedPostUnlockCache.set(key, {
+    ciphertext: envelope.ciphertext,
+    markdown: String(markdown || '')
+  });
+}
+
+function getProtectedPublicMetadata(markdown, postname, fallbackTitle) {
+  try {
+    const publicMarkdown = stripEncryptedBodyForPublicUse(markdown);
+    const frontMatter = parseFrontMatter(publicMarkdown).frontMatter || {};
+    const normalized = { ...frontMatter };
+    if (normalized.tags != null && normalized.tag == null) normalized.tag = normalized.tags;
+    if (normalized.version != null && normalized.versionLabel == null) normalized.versionLabel = normalized.version;
+    normalized.protected = true;
+    normalized.location = postname;
+    if (!normalized.title) normalized.title = fallbackTitle || postname;
+    return { markdown: publicMarkdown, metadata: normalized };
+  } catch (_) {
+    return {
+      markdown: '',
+      metadata: {
+        protected: true,
+        location: postname,
+        title: fallbackTitle || postname
+      }
+    };
+  }
+}
+
+function renderProtectedPostUnlock({
+  containers,
+  postname,
+  markdown,
+  envelope,
+  fallbackTitle
+} = {}) {
+  const mainEl = containers && containers.mainElement ? containers.mainElement : getViewContainer('post', 'main');
+  if (!mainEl) return;
+  resetTOCView('post', containers, { reason: 'protectedPost', immediate: true });
+  const publicInfo = getProtectedPublicMetadata(markdown, postname, fallbackTitle);
+  const publicMetadata = publicInfo.metadata || {};
+  const title = publicMetadata.title || fallbackTitle || postname;
+
+  const shell = document.createElement('section');
+  shell.className = 'protected-post-unlock';
+  shell.setAttribute('aria-live', 'polite');
+
+  const heading = document.createElement('h1');
+  heading.className = 'protected-post-title';
+  heading.textContent = title;
+  shell.appendChild(heading);
+
+  const body = document.createElement('p');
+  body.className = 'protected-post-body';
+  body.textContent = t('ui.protectedPostBody');
+  shell.appendChild(body);
+
+  const excerpt = String(publicMetadata.excerpt || '').trim();
+  if (excerpt) {
+    const excerptEl = document.createElement('p');
+    excerptEl.className = 'protected-post-excerpt';
+    excerptEl.textContent = excerpt;
+    shell.appendChild(excerptEl);
+  }
+
+  const form = document.createElement('form');
+  form.className = 'protected-post-form';
+  const unlockRequestId = __activePostRequestId;
+  const label = document.createElement('label');
+  label.className = 'protected-post-password-label';
+  label.textContent = t('ui.protectedPostPasswordLabel');
+  const input = document.createElement('input');
+  input.type = 'password';
+  input.autocomplete = 'off';
+  input.required = true;
+  input.spellcheck = false;
+  input.setAttribute('autocapitalize', 'none');
+  input.setAttribute('data-1p-ignore', 'true');
+  input.setAttribute('data-lpignore', 'true');
+  input.className = 'protected-post-password';
+  label.appendChild(input);
+  const button = document.createElement('button');
+  button.type = 'submit';
+  button.className = 'btn-primary protected-post-submit';
+  button.textContent = t('ui.protectedPostUnlock');
+  const error = document.createElement('p');
+  error.className = 'protected-post-error';
+  error.hidden = true;
+  form.append(label, button, error);
+  shell.appendChild(form);
+
+  mainEl.replaceChildren(shell);
+  notifyThemeViewChange('post', { showSearch: false, showTags: false, protected: true });
+  try { setDocTitle(title); } catch (_) {}
+  try { renderTabs('post', title); } catch (_) {}
+  try {
+    const seoData = extractSEOFromMarkdown(publicInfo.markdown || '', {
+      ...publicMetadata,
+      title,
+      location: postname
+    }, siteConfig);
+    updateSEO(seoData, siteConfig);
+  } catch (_) {}
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    error.hidden = true;
+    const password = input.value || '';
+    if (!password) return;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    const originalLabel = button.textContent;
+    button.textContent = t('ui.protectedPostUnlocking');
+    try {
+      const decrypted = await decryptMarkdownDocument(markdown, password);
+      const currentPostname = getQueryVariable('id') || '';
+      if (!form.isConnected || unlockRequestId !== __activePostRequestId || currentPostname !== postname) {
+        input.value = '';
+        return;
+      }
+      cacheProtectedMarkdown(postname, envelope, decrypted);
+      input.value = '';
+      displayPost(postname, { markdown });
+    } catch (_) {
+      error.textContent = t('ui.protectedPostWrongPassword');
+      error.hidden = false;
+      try { input.focus({ preventScroll: true }); }
+      catch (__) { input.focus(); }
+    } finally {
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+      button.textContent = originalLabel || t('ui.protectedPostUnlock');
+    }
+  });
+}
+
+function isProtectedMetadataValue(value) {
+  if (value === true) return true;
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return ['true', '1', 'yes', 'y', 'on', 'enabled', 'protected'].includes(normalized);
+}
+
+function isPostProtectedByIndex(postname) {
+  const loc = String(postname || '').trim();
+  if (!loc) return false;
+  try {
+    for (const [, meta] of Object.entries(postsIndexCache || {})) {
+      if (!meta || typeof meta !== 'object') continue;
+      if (String(meta.location || '') === loc) {
+        return isProtectedMetadataValue(meta.protected);
+      }
+      if (Array.isArray(meta.versions)) {
+        const match = meta.versions.find(ver => ver && String(ver.location || '') === loc);
+        if (match) {
+          return isProtectedMetadataValue(match.protected) || isProtectedMetadataValue(meta.protected);
+        }
+      }
+    }
+  } catch (_) {}
+  return false;
+}
+
+function displayPost(postname, options = {}) {
   // Bump request token to invalidate any in-flight older renders
   const reqId = (++__activePostRequestId);
   const containers = getViewContainers('post');
 
   updateLayoutLoadingState('post', true, containers);
 
-  callThemeHook('renderPostLoadingState', {
+  callThemeEffect('renderPostLoadingState', {
     view: 'post',
     containers,
     translator: t,
@@ -684,16 +1177,87 @@ function displayPost(postname) {
 
   notifyThemeViewChange('post', { showSearch: false, showTags: false });
 
-  return getFile(`${getContentRoot()}/${postname}`).then(markdown => {
+  const hasPreloadedMarkdown = Object.prototype.hasOwnProperty.call(options || {}, 'markdown');
+  const markdownSource = hasPreloadedMarkdown
+    ? Promise.resolve(String(options.markdown || ''))
+    : getFile(`${getContentRoot()}/${postname}`);
+
+  return markdownSource.then(async markdown => {
     // Ignore stale responses if a newer navigation started
     if (reqId !== __activePostRequestId) return;
+    const encryptedEnvelope = parseEncryptedMarkdownEnvelope(markdown);
+    let markdownForRender = markdown;
+    const protectedByIndex = isPostProtectedByIndex(postname);
+    if (encryptedEnvelope.encrypted || protectedByIndex) {
+      if (!encryptedEnvelope.valid) {
+        updateLayoutLoadingState('post', false, containers);
+        resetTOCView('post', containers, { reason: 'protectedPostInvalid', immediate: true });
+        const publicInfo = getProtectedPublicMetadata(
+          encryptedEnvelope.encrypted ? markdown : '',
+          postname,
+          postsByLocationTitle[postname] || postname
+        );
+        const publicMetadata = publicInfo.metadata || {};
+        const invalidTitle = t('errors.protectedPostInvalidTitle');
+        const backHref = withLangParam(`?tab=${encodeURIComponent(getHomeSlug())}`);
+        const backText = postsEnabled() ? t('ui.backToAllPosts') : (t('ui.backToHome') || t('ui.backToAllPosts'));
+        renderErrorState(containers.mainElement || getViewContainer('post', 'main'), {
+          title: invalidTitle,
+          message: t('errors.protectedPostInvalidBody'),
+          actions: [{ href: backHref, label: backText }],
+          view: 'post',
+          containers
+        });
+        setDocTitle(invalidTitle);
+        try {
+          const seoData = extractSEOFromMarkdown(publicInfo.markdown || '', {
+            ...publicMetadata,
+            title: invalidTitle,
+            description: t('errors.protectedPostInvalidBody'),
+            excerpt: '',
+            location: postname
+          }, siteConfig);
+          updateSEO(seoData, siteConfig);
+        } catch (_) {}
+        notifyThemeViewChange('post', { showSearch: false, showTags: false });
+        return;
+      }
+      const cachedMarkdown = getCachedProtectedMarkdown(postname, encryptedEnvelope);
+      if (cachedMarkdown) {
+        markdownForRender = cachedMarkdown;
+      } else {
+        updateLayoutLoadingState('post', false, containers);
+        const fallbackTitle = postsByLocationTitle[postname] || postname;
+        renderProtectedPostUnlock({
+          containers,
+          postname,
+          markdown,
+          envelope: encryptedEnvelope,
+          fallbackTitle
+        });
+        return;
+      }
+    }
     // Remove loading-state classes
     updateLayoutLoadingState('post', false, containers);
 
     const dir = (postname.lastIndexOf('/') >= 0) ? postname.slice(0, postname.lastIndexOf('/') + 1) : '';
     const baseDir = `${getContentRoot()}/${dir}`;
-    const output = mdParse(markdown, baseDir);
+    const { mdParse } = await loadMarkdownModule();
+    if (reqId !== __activePostRequestId) return;
+    const output = mdParse(markdownForRender, baseDir);
     const fallbackTitle = postsByLocationTitle[postname] || postname;
+    const frontMatterMetadata = (() => {
+      try {
+        const frontMatter = parseFrontMatter(markdownForRender).frontMatter || {};
+        const normalized = { ...frontMatter };
+        if (normalized.tags != null && normalized.tag == null) normalized.tag = normalized.tags;
+        if (normalized.version != null && normalized.versionLabel == null) normalized.versionLabel = normalized.version;
+        return normalized;
+      } catch (_) {
+        return {};
+      }
+    })();
 
     let postEntry = (Object.entries(postsIndexCache || {}) || []).find(([, v]) => v && v.location === postname);
     let postMetadata = postEntry ? { ...postEntry[1] } : {};
@@ -716,13 +1280,41 @@ function displayPost(postname) {
       const resolvedTitle = postsByLocationTitle[postname] || fallbackTitle;
       if (resolvedTitle) postMetadata.title = resolvedTitle;
     }
-
-    const hookResult = callThemeHook('renderPostView', {
+    postMetadata = {
+      ...postMetadata,
+      ...frontMatterMetadata,
+      location: postname
+    };
+    const content = createContentModel({
+      rawMarkdown: markdownForRender,
+      html: output.post,
+      tocHtml: output.toc,
+      metadata: {
+        ...postMetadata,
+        title: postMetadata.title || fallbackTitle,
+        location: postname
+      },
+      baseDir,
+      location: postname,
+      title: postMetadata.title || fallbackTitle
+    });
+    const runtimeContext = createThemeRuntimeContext({
       view: 'post',
       containers,
+      content,
+      route: { id: postname, title: postMetadata.title || fallbackTitle }
+    });
+
+    const effectResult = callThemeEffect('renderPostView', {
+      view: 'post',
+      containers,
+      ctx: runtimeContext,
+      content,
       markdownHtml: output.post,
       tocHtml: output.toc,
-      markdown,
+      rawMarkdown: markdownForRender,
+      markdown: markdownForRender,
+      baseDir,
       fallbackTitle,
       postMetadata,
       postId: postname,
@@ -749,6 +1341,7 @@ function displayPost(postname) {
         ensureAutoHeight,
         getFile,
         getContentRoot,
+        setSafeHtml,
         withLangParam,
         fetchMarkdown: (loc) => getFile(`${getContentRoot()}/${loc}`),
         makeLangHref: (loc) => withLangParam(`?id=${encodeURIComponent(loc)}`)
@@ -757,32 +1350,54 @@ function displayPost(postname) {
 
     let articleTitle = fallbackTitle;
     let decorated = false;
-    if (typeof hookResult === 'object') {
-      decorated = !!hookResult.decorated;
-      if (hookResult.title) articleTitle = String(hookResult.title);
+    if (typeof effectResult === 'object') {
+      decorated = !!effectResult.decorated;
+      if (effectResult.title) articleTitle = String(effectResult.title);
     }
 
     if (!decorated) {
       const mainEl = containers.mainElement || getViewContainer('post', 'main');
-      callThemeHook('decoratePostView', {
+      callThemeEffect('decoratePostView', {
         view: 'post',
         container: mainEl,
         articleTitle,
         postMetadata,
-        markdown,
+        markdown: markdownForRender,
         translate: t,
         document,
         window
       });
     }
 
+    try {
+      if (!isAnnotateConfigured(siteConfig)) throw new Error('annotate disabled');
+      const { mountAnnotateComments, resolveAnnotateArticleContext } = await loadAnnotateModule();
+      if (reqId !== __activePostRequestId) return;
+      const mainEl = containers.mainElement || getViewContainer('post', 'main');
+      const annotateContext = resolveAnnotateArticleContext({
+        rawIndex: rawIndexCache,
+        postId: postname,
+        postMetadata,
+        lang: getCurrentLang()
+      });
+      mountAnnotateComments({
+        container: mainEl,
+        siteConfig,
+        context: annotateContext,
+        fetchImpl: fetch,
+        document,
+        window
+      });
+    } catch (_) {}
+
     notifyThemeViewChange('post', { showSearch: false, showTags: false });
     try { setDocTitle(articleTitle); } catch (_) {}
+    initializeMathForView('post', { containers });
     initializeSyntaxHighlightingForView('post', { containers });
     refreshTagSidebar({ view: 'post', containers, postsIndex: postsIndexCache });
 
     try {
-      const seoData = extractSEOFromMarkdown(markdown, {
+      const seoData = extractSEOFromMarkdown(markdownForRender, {
         ...postMetadata,
         title: articleTitle,
         location: postname
@@ -794,7 +1409,7 @@ function displayPost(postname) {
 
     // Let theme handle hash-based scrolling if desired; fallback to previous behavior
     const currentHash = (location.hash || '').replace(/^#/, '');
-    const handledHash = callThemeHook('scrollToHash', {
+    const handledHash = callThemeEffect('scrollToHash', {
       hash: currentHash,
       view: 'post',
       containers,
@@ -866,27 +1481,11 @@ function displayIndex(parsed) {
       const siteDef = (typeof siteConfig === 'object' && (siteConfig.defaultLanguage || siteConfig.defaultLang)) || 'en';
       const defNorm = normalizeLangKey(siteDef);
 
-      const RESERVED = new Set(['tag','tags','image','date','excerpt','thumb','cover']);
       const seen = new Set();
       const ordered = [];
 
       const pickPreferred = (entry) => {
-        const variants = [];
-        try {
-          for (const [k, v] of Object.entries(entry || {})) {
-            if (RESERVED.has(k)) continue;
-            const nk = normalizeLangKey(k);
-            if (k === 'location' && typeof v === 'string') {
-              variants.push({ lang: 'default', location: String(v) });
-            } else if (typeof v === 'string') {
-              variants.push({ lang: nk, location: String(v) });
-            } else if (Array.isArray(v)) {
-              v.forEach(item => { if (typeof item === 'string') variants.push({ lang: nk, location: String(item) }); });
-            } else if (v && typeof v === 'object' && typeof v.location === 'string') {
-              variants.push({ lang: nk, location: String(v.location) });
-            }
-          }
-        } catch (_) {}
+        const variants = collectRawIndexVariants(entry);
         if (!variants.length) return '';
         const findBy = (langs) => variants.find(x => langs.includes(x.lang));
         const cand = findBy([curNorm]) || findBy([defNorm]) || findBy(['en']) || findBy(['default']) || variants[0];
@@ -926,7 +1525,7 @@ function displayIndex(parsed) {
   let pageEntries = entries.slice(start, end);
   // Allow theme to customize pagination behavior (e.g., infinite scroll)
   try {
-    const paginated = callThemeHook('paginateEntries', {
+    const paginated = callThemeEffect('paginateEntries', {
       view: 'posts',
       entries,
       total,
@@ -953,12 +1552,18 @@ function displayIndex(parsed) {
         totalPages = Math.max(1, paginated.totalPages);
       }
     }
-  } catch (_) { /* ignore pagination hook issues */ }
+  } catch (_) { /* ignore pagination effect issues */ }
 
   const mainview = containers.mainElement || getViewContainer('posts', 'main');
-  callThemeHook('renderIndexView', {
+  const runtimeContext = createThemeRuntimeContext({
     view: 'posts',
     containers,
+    route: { page }
+  });
+  callThemeEffect('renderIndexView', {
+    view: 'posts',
+    containers,
+    ctx: runtimeContext,
     container: mainview,
     entries,
     pageEntries,
@@ -991,7 +1596,7 @@ function displayIndex(parsed) {
   notifyThemeViewChange('posts', { showSearch: true, showTags: true, queryValue: '' });
   setDocTitle(t('titles.allPosts'));
 
-  callThemeHook('afterIndexRender', {
+  callThemeEffect('afterIndexRender', {
     entries: pageEntries,
     translate: t,
     getFile,
@@ -1037,7 +1642,7 @@ function displaySearch(query) {
   };
   let filtered = null;
   try {
-    const themed = callThemeHook('filterSearchEntries', {
+    const themed = callThemeEffect('filterSearchEntries', {
       view: 'search',
       entries: allEntries,
       query: q,
@@ -1049,7 +1654,7 @@ function displaySearch(query) {
       window
     });
     if (Array.isArray(themed)) filtered = themed;
-  } catch (_) { /* ignore search hook issues */ }
+  } catch (_) { /* ignore search effect issues */ }
   if (!Array.isArray(filtered)) filtered = defaultFilter(allEntries, q, tagFilter);
 
   const total = filtered.length;
@@ -1060,7 +1665,7 @@ function displaySearch(query) {
   const end = start + PAGE_SIZE;
   let pageEntries = filtered.slice(start, end);
   try {
-    const paginated = callThemeHook('paginateEntries', {
+    const paginated = callThemeEffect('paginateEntries', {
       view: 'search',
       entries: filtered,
       total,
@@ -1088,12 +1693,18 @@ function displaySearch(query) {
         totalPages = Math.max(1, paginated.totalPages);
       }
     }
-  } catch (_) { /* ignore pagination hook issues */ }
+  } catch (_) { /* ignore pagination effect issues */ }
 
   const mainview = containers.mainElement || getViewContainer('search', 'main');
-  callThemeHook('renderSearchResults', {
+  const runtimeContext = createThemeRuntimeContext({
     view: 'search',
     containers,
+    route: { query: q, tag: tagFilter, page }
+  });
+  callThemeEffect('renderSearchResults', {
+    view: 'search',
+    containers,
+    ctx: runtimeContext,
     container: mainview,
     entries: pageEntries,
     total,
@@ -1128,7 +1739,7 @@ function displaySearch(query) {
   notifyThemeViewChange('search', { showSearch: true, showTags: true, queryValue: q, tagFilter });
   setDocTitle(tagFilter ? t('ui.tagSearch', tagFilter) : t('titles.search', q));
 
-  callThemeHook('afterSearchRender', {
+  callThemeEffect('afterSearchRender', {
     entries: pageEntries,
     translate: t,
     getFile,
@@ -1154,7 +1765,7 @@ function displayStaticTab(slug) {
 
   resetTOCView('tab', containers, { reason: 'staticTab' });
   const main = containers.mainElement || getViewContainer('tab', 'main');
-  callThemeHook('renderStaticTabLoadingState', {
+  callThemeEffect('renderStaticTabLoadingState', {
     view: 'tab',
     containers,
     document,
@@ -1163,20 +1774,44 @@ function displayStaticTab(slug) {
   notifyThemeViewChange('tab', { showSearch: false, showTags: false });
   renderTabs(slug);
   getFile(`${getContentRoot()}/${tab.location}`)
-    .then(md => {
+    .then(async md => {
       // 移除加载状态类
       updateLayoutLoadingState('tab', false, containers);
 
       const dir = (tab.location.lastIndexOf('/') >= 0) ? tab.location.slice(0, tab.location.lastIndexOf('/') + 1) : '';
       const baseDir = `${getContentRoot()}/${dir}`;
+      const { mdParse } = await loadMarkdownModule();
       const output = mdParse(md, baseDir);
-
-      const hookResult = callThemeHook('renderStaticTabView', {
+      const content = createContentModel({
+        rawMarkdown: md,
+        html: output.post,
+        tocHtml: output.toc,
+        metadata: {
+          title: tab.title,
+          author: tab.author || 'Ekily',
+          location: tab.location
+        },
+        baseDir,
+        location: tab.location,
+        title: tab.title
+      });
+      const runtimeContext = createThemeRuntimeContext({
         view: 'tab',
         containers,
+        content,
+        route: { tab: slug, title: tab.title }
+      });
+
+      const effectResult = callThemeEffect('renderStaticTabView', {
+        view: 'tab',
+        containers,
+        ctx: runtimeContext,
+        content,
         markdownHtml: output.post,
         tocHtml: output.toc,
+        rawMarkdown: md,
         markdown: md,
+        baseDir,
         tab,
         slug,
         siteConfig,
@@ -1200,6 +1835,7 @@ function displayStaticTab(slug) {
           ensureAutoHeight,
           getFile,
           getContentRoot,
+          setSafeHtml,
           withLangParam,
           fetchMarkdown: (loc) => getFile(`${getContentRoot()}/${loc}`),
           makeLangHref: (loc) => withLangParam(`?id=${encodeURIComponent(loc)}`)
@@ -1207,17 +1843,18 @@ function displayStaticTab(slug) {
       }) || {};
 
       let pageTitle = tab.title;
-      if (typeof hookResult === 'object') {
-        if (hookResult.title) pageTitle = String(hookResult.title);
+      if (typeof effectResult === 'object') {
+        if (effectResult.title) pageTitle = String(effectResult.title);
       }
 
       initializeSyntaxHighlightingForView('tab', { containers });
+      initializeMathForView('tab', { containers });
       refreshTagSidebar({ view: 'tab', containers, postsIndex: postsIndexCache });
 
       try {
         const seoData = extractSEOFromMarkdown(md, {
           title: pageTitle,
-          author: tab.author || 'NanoSite',
+          author: tab.author || 'Ekily',
           location: tab.location
         }, siteConfig);
         updateSEO(seoData, siteConfig);
@@ -1328,8 +1965,8 @@ function routeAndRender() {
       updateSEO({
         title: page > 1 ? 
           `${getLocalizedValue(siteConfig.siteTitle) || 'All Posts'} - Page ${page}` : 
-          getLocalizedValue(siteConfig.siteTitle) || 'NanoSite - Zero-Dependency Static Blog',
-        description: getLocalizedValue(siteConfig.siteDescription) || 'A pure front-end template for simple blogs and docs. No compilation needed - just edit Markdown files and deploy.',
+          getLocalizedValue(siteConfig.siteTitle) || 'Ekily Press',
+        description: getLocalizedValue(siteConfig.siteDescription) || 'Where knowledge becomes pages.',
         type: 'website',
         url: window.location.href
       }, siteConfig);
@@ -1344,7 +1981,7 @@ function routeAndRender() {
 // isModifiedClick moved to utils.js
 
 document.addEventListener('click', (e) => {
-  if (callThemeHook('handleDocumentClick', { event: e, document, window })) return;
+  if (callThemeEffect('handleDocumentClick', { event: e, document, window })) return;
   const a = e.target && e.target.closest ? e.target.closest('a') : null;
   if (!a) return;
 
@@ -1368,7 +2005,7 @@ document.addEventListener('click', (e) => {
     history.pushState({}, '', url.toString());
     routeAndRender();
     const nextKey = getCurrentRouteKey();
-    const handled = callThemeHook('handleRouteScroll', {
+    const handled = callThemeEffect('handleRouteScroll', {
       reason: 'push',
       prevKey,
       nextKey,
@@ -1390,7 +2027,7 @@ window.addEventListener('popstate', () => {
   refreshTagSidebar({ postsIndex: postsIndexCache });
   try {
     const curKey = getCurrentRouteKey();
-    const handled = callThemeHook('handleRouteScroll', {
+    const handled = callThemeEffect('handleRouteScroll', {
       reason: 'popstate',
       prevKey,
       nextKey: curKey,
@@ -1409,7 +2046,7 @@ window.addEventListener('popstate', () => {
 
 // Update sliding indicator on window resize
 window.addEventListener('resize', (event) => {
-  callThemeHook('handleWindowResize', { event, document, window });
+  callThemeEffect('handleWindowResize', { event, document, window });
 });
 
 // Boot
@@ -1422,8 +2059,9 @@ const defaultLang = (document.documentElement && document.documentElement.getAtt
 // Bootstrap i18n without persisting to localStorage so site.yaml can
 // still override the default language on first load.
 await initI18n({ defaultLang, persist: false });
+setBootProgress(0.25);
 // Expose translate helper for modules that don't import i18n directly
-try { window.__ns_t = (key) => t(key); } catch (_) { /* no-op */ }
+try { window.__press_t = (key) => t(key); } catch (_) { /* no-op */ }
 
 // Install error reporter early to catch resource 404s (e.g., theme CSS, images)
 try { initErrorReporter({}); } catch (_) {}
@@ -1436,11 +2074,12 @@ try {
 }
 siteConfig = siteConfigResult || {};
 try { configureFetchCachePolicy(siteConfig); } catch (_) {}
+setBootProgress(0.4);
 
 // Apply content root override early so subsequent loads honor it
 try {
   const rawRoot = (siteConfig && (siteConfig.contentRoot || siteConfig.contentBase || siteConfig.contentPath)) || 'wwwroot';
-  if (typeof window !== 'undefined') window.__ns_content_root = String(rawRoot).replace(/^\/+|\/+$/g, '');
+  if (typeof window !== 'undefined') window.__press_content_root = String(rawRoot).replace(/^\/+|\/+$/g, '');
 } catch (_) {}
 
 // Apply site-configured defaults early
@@ -1474,9 +2113,10 @@ try {
 
 // Build layout according to the active theme pack before binding UI logic
 await ensureThemeLayout();
+setBootProgress(0.6);
 
 // Ensure theme controls are present, then apply and bind
-const controlsHandled = callThemeHook('setupThemeControls', {
+const controlsHandled = callThemeEffect('setupThemeControls', {
   mountThemeControls,
   applySavedTheme,
   bindThemeToggle,
@@ -1490,7 +2130,7 @@ if (controlsHandled === undefined) {
 }
 
 // Localize search placeholder ASAP
-callThemeHook('updateSearchPlaceholder', {
+callThemeEffect('updateSearchPlaceholder', {
   placeholder: t('sidebar.searchPlaceholder'),
   document,
   window
@@ -1498,7 +2138,7 @@ callThemeHook('updateSearchPlaceholder', {
 try { setupSearch(); } catch (_) {}
 
 // Observe viewport changes for responsive tabs
-callThemeHook('setupResponsiveTabsObserver', {
+callThemeEffect('setupResponsiveTabsObserver', {
   getTabs: () => tabsBySlug,
   document,
   window,
@@ -1507,7 +2147,7 @@ callThemeHook('setupResponsiveTabsObserver', {
 
 // Reflect theme config in the layout (e.g., data attributes)
 try {
-  callThemeHook('reflectThemeConfig', {
+  callThemeEffect('reflectThemeConfig', {
     config: siteConfig,
     document,
     window
@@ -1521,7 +2161,7 @@ async function softResetToSiteDefaultLanguage() {
     // Switch language immediately (do not persist to mimic reset semantics)
     await initI18n({ lang: String(def), persist: false });
     // Reflect placeholder promptly
-    callThemeHook('updateSearchPlaceholder', {
+    callThemeEffect('updateSearchPlaceholder', {
       placeholder: t('sidebar.searchPlaceholder'),
       document,
       window
@@ -1565,13 +2205,7 @@ async function softResetToSiteDefaultLanguage() {
       try {
         for (const [, entry] of Object.entries(rawIndex)) {
           if (!entry || typeof entry !== 'object') continue;
-          for (const [k, v] of Object.entries(entry)) {
-            if (['tag','tags','image','date','excerpt','thumb','cover'].includes(k)) continue;
-            if (k === 'location' && typeof v === 'string') { baseAllowed.add(String(v)); continue; }
-            if (Array.isArray(v)) { v.forEach(item => { if (typeof item === 'string') baseAllowed.add(String(item)); }); continue; }
-            if (v && typeof v === 'object' && typeof v.location === 'string') baseAllowed.add(String(v.location));
-            else if (typeof v === 'string') baseAllowed.add(String(v));
-          }
+          collectRawIndexVariants(entry).forEach(variant => { baseAllowed.add(String(variant.location)); });
         }
       } catch (_) {}
     }
@@ -1590,22 +2224,7 @@ async function softResetToSiteDefaultLanguage() {
         const curNorm = normalizeLangKey(cur);
         for (const [, entry] of Object.entries(rawIndex)) {
           if (!entry || typeof entry !== 'object') continue;
-          const reserved = new Set(['tag','tags','image','date','excerpt','thumb','cover']);
-          const variants = [];
-          for (const [k, v] of Object.entries(entry)) {
-            if (reserved.has(k)) continue;
-            const nk = normalizeLangKey(k);
-            if (k === 'location' && typeof v === 'string') {
-              variants.push({ lang: 'default', location: String(v) });
-            } else if (typeof v === 'string') {
-              variants.push({ lang: nk, location: String(v) });
-            } else if (Array.isArray(v)) {
-              // For version arrays, include all paths for aliasing
-              v.forEach(item => { if (typeof item === 'string') variants.push({ lang: nk, location: String(item) }); });
-            } else if (v && typeof v === 'object' && typeof v.location === 'string') {
-              variants.push({ lang: nk, location: String(v.location) });
-            }
-          }
+          const variants = collectRawIndexVariants(entry);
           if (!variants.length) continue;
           const findBy = (langs) => variants.find(x => langs.includes(x.lang));
           // Prefer the primary location for the current language as computed in postsIndexCache
@@ -1632,7 +2251,7 @@ async function softResetToSiteDefaultLanguage() {
     try { refreshLanguageSelector(); } catch (_) {}
     // Rebuild the Tools panel so all labels reflect the new language
     try {
-      callThemeHook('resetThemeControls', {
+      callThemeEffect('resetThemeControls', {
         document,
         window,
         mountThemeControls,
@@ -1662,8 +2281,8 @@ async function softResetToSiteDefaultLanguage() {
         return (lang && val[lang]) || val.default || '';
       };
       updateSEO({
-        title: getLocalizedValue(siteConfig.siteTitle) || 'NanoSite - Zero-Dependency Static Blog',
-        description: getLocalizedValue(siteConfig.siteDescription) || 'A pure front-end template for simple blogs and docs. No compilation needed - just edit Markdown files and deploy.',
+        title: getLocalizedValue(siteConfig.siteTitle) || 'Ekily Press',
+        description: getLocalizedValue(siteConfig.siteDescription) || 'Where knowledge becomes pages.',
         type: 'website', url: window.location.href
       }, siteConfig);
     } catch (_) {}
@@ -1676,7 +2295,7 @@ async function softResetToSiteDefaultLanguage() {
   }
 }
 // Expose as a global so the UI can call it
-try { window.__ns_softResetLang = () => softResetToSiteDefaultLanguage(); } catch (_) {}
+try { window.__press_softResetLang = () => softResetToSiteDefaultLanguage(); } catch (_) {}
 
 restoreLastSiteRouteIfEntry();
 
@@ -1685,6 +2304,7 @@ const loadResults = await Promise.allSettled([
   loadContentJsonWithRaw(getContentRoot(), 'index'),
   loadTabsJson(getContentRoot(), 'tabs')
 ]);
+setBootProgress(0.82);
 
 try {
   const contentResult = loadResults[0].status === 'fulfilled' ? (loadResults[0].value || {}) : {};
@@ -1719,20 +2339,11 @@ try {
       try {
         for (const [, entry] of Object.entries(rawIndex)) {
           if (!entry || typeof entry !== 'object') continue;
-          for (const [k, v] of Object.entries(entry)) {
-            // Skip known non-variant keys
-            if (['tag','tags','image','date','excerpt','thumb','cover'].includes(k)) continue;
-            const nk = normalizeLangKey(k);
-            const cur = (getCurrentLang && getCurrentLang()) || 'en';
-            const curNorm = normalizeLangKey(cur);
-            const allowLang = (nk === 'default' || nk === curNorm || k === 'location');
-            if (!allowLang) continue;
-            // Support both unified and legacy shapes (only for allowed languages)
-            if (k === 'location' && typeof v === 'string') { baseAllowed.add(String(v)); continue; }
-            if (Array.isArray(v)) { v.forEach(item => { if (typeof item === 'string') baseAllowed.add(String(item)); }); continue; }
-            if (v && typeof v === 'object' && typeof v.location === 'string') baseAllowed.add(String(v.location));
-            else if (typeof v === 'string') baseAllowed.add(String(v));
-          }
+          const cur = (getCurrentLang && getCurrentLang()) || 'en';
+          const curNorm = normalizeLangKey(cur);
+          collectRawIndexVariants(entry, {
+            allowLang: (lang, key) => lang === 'default' || lang === curNorm || key === 'location' || key === 'path'
+          }).forEach(variant => { baseAllowed.add(String(variant.location)); });
         }
       } catch (_) { /* ignore parse issues */ }
     }
@@ -1751,21 +2362,7 @@ try {
         const curNorm = normalizeLangKey(cur);
         for (const [, entry] of Object.entries(rawIndex)) {
           if (!entry || typeof entry !== 'object') continue;
-          const reserved = new Set(['tag','tags','image','date','excerpt','thumb','cover']);
-          const variants = [];
-          for (const [k, v] of Object.entries(entry)) {
-            if (reserved.has(k)) continue;
-            const nk = normalizeLangKey(k);
-            if (k === 'location' && typeof v === 'string') {
-              variants.push({ lang: 'default', location: String(v) });
-            } else if (typeof v === 'string') {
-              variants.push({ lang: nk, location: String(v) });
-            } else if (Array.isArray(v)) {
-              v.forEach(item => { if (typeof item === 'string') variants.push({ lang: nk, location: String(item) }); });
-            } else if (v && typeof v === 'object' && typeof v.location === 'string') {
-              variants.push({ lang: nk, location: String(v.location) });
-            }
-          }
+          const variants = collectRawIndexVariants(entry);
           if (!variants.length) continue;
           const findBy = (langs) => variants.find(x => langs.includes(x.lang));
           // Prefer the primary location for the current language as computed in postsIndexCache
@@ -1809,7 +2406,7 @@ try {
     // Apply site-controlled theme after loading config
     try {
       applyThemeConfig(siteConfig);
-      callThemeHook('reflectThemeConfig', {
+      callThemeEffect('reflectThemeConfig', {
         config: siteConfig,
         document,
         window
@@ -1838,7 +2435,7 @@ try {
       };
       initErrorReporter({
         reportUrl: resolveReportUrl(siteConfig),
-        siteTitle: pick(siteConfig && siteConfig.siteTitle) || 'NanoSite',
+        siteTitle: pick(siteConfig && siteConfig.siteTitle) || 'Press',
         enableOverlay: !!(siteConfig && siteConfig.errorOverlay === true)
       });
     } catch (_) {}
@@ -1854,8 +2451,8 @@ try {
       
       // Update initial page meta tags with site config
       updateSEO({
-        title: getLocalizedValue(siteConfig.siteTitle) || 'NanoSite - Zero-Dependency Static Blog',
-        description: getLocalizedValue(siteConfig.siteDescription) || 'A pure front-end template for simple blogs and docs. No compilation needed - just edit Markdown files and deploy.',
+        title: getLocalizedValue(siteConfig.siteTitle) || 'Ekily Press',
+        description: getLocalizedValue(siteConfig.siteDescription) || 'Where knowledge becomes pages.',
         type: 'website',
         url: window.location.href
       }, siteConfig);
@@ -1863,6 +2460,8 @@ try {
     
   restoreLastSiteRouteIfEntry();
   routeAndRender();
+  setBootProgress(1);
+  clearBootProgress();
   bindSiteViewStatePersistence();
   bindPostsMetadataListener();
 } catch (e) {
@@ -1875,6 +2474,8 @@ try {
     containers: bootContainers
   });
   notifyThemeViewChange('boot', { showSearch: false, showTags: false });
+  setBootProgress(1);
+  clearBootProgress();
   try {
     const err = new Error((t('errors.indexUnavailableBody') || 'Could not load the post index.'));
     try { err.name = 'Warning'; } catch(_) {}
@@ -1884,5 +2485,5 @@ try {
 
 // Footer: set dynamic year once
 try {
-  callThemeHook('setupFooter', { translate: t, document, window });
+  callThemeEffect('setupFooter', { translate: t, document, window });
 } catch (_) {}

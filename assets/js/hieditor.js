@@ -1,4 +1,4 @@
-import { simpleHighlight } from './syntax-highlight.js';
+import { simpleHighlight } from './syntax-highlight.js?v=press-system-v3.4.16';
 
 function escapeHtmlInline(text) {
   if (!text) return '';
@@ -284,39 +284,55 @@ function renderHighlight(codeEl, gutterEl, value, language, options = {}) {
     // Fallback to plain escaped if markers still leak
     safeHtml = escapeHtmlInline(raw);
   }
-  // Render using a safe DOM builder that only allows <span class="syntax-*> wrappers
+  // Render using a safe DOM builder that only allows highlight span wrappers
   // and decodes entities for text nodes. This avoids interpreting arbitrary HTML.
   (function safeRender(target, markup) {
-    // Minimal entity decoder matching escapeHtmlInline
+    // Decode highlighter escapes before inserting text nodes so the mirror
+    // keeps the same wrapping geometry as the backing textarea.
     const decode = (s) => String(s || '')
       .replace(/&lt;/g, '<')
       .replace(/&gt;/g, '>')
       .replace(/&quot;/g, '"')
       .replace(/&#0?39;/g, "'")
+      .replace(/&#x([0-9a-fA-F]+);/g, (match, hex) => {
+        const num = parseInt(hex, 16);
+        if (!Number.isFinite(num) || num < 0) return match;
+        try { return String.fromCodePoint(num); } catch (_) { return match; }
+      })
+      .replace(/&#([0-9]+);/g, (match, dec) => {
+        const num = parseInt(dec, 10);
+        if (!Number.isFinite(num) || num < 0) return match;
+        try { return String.fromCodePoint(num); } catch (_) { return match; }
+      })
       // Unescape ampersand last to avoid double-unescaping
       .replace(/&amp;/g, '&');
     const root = document.createDocumentFragment();
     const stack = [root];
     let i = 0;
-    const openStart = '<span class="syntax-';
-    const openEnd = '">';
     const closeTag = '</span>';
-    const isTypeOk = (t) => /^[a-z-]+$/.test(t);
+    const isClassOk = (cls) => (
+      /^syntax-[a-z-]+$/.test(cls)
+      || /^hljs-[A-Za-z0-9_-]+$/.test(cls)
+      || /^[A-Za-z]+_+$/.test(cls)
+    );
     while (i < markup.length) {
-      if (markup.startsWith(openStart, i)) {
-        const j = markup.indexOf(openEnd, i + openStart.length);
-        if (j !== -1) {
-          const cls = markup.slice(i + openStart.length, j);
-          if (isTypeOk(cls)) {
+      if (markup.startsWith('<span', i)) {
+        const match = markup.slice(i).match(/^<\s*span\b([^>]*)>/i);
+        if (match) {
+          const clsMatch = (match[1] || '').match(/\bclass\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/i);
+          const classes = clsMatch
+            ? (clsMatch[2] || clsMatch[3] || clsMatch[4] || '').split(/\s+/).filter(isClassOk)
+            : [];
+          if (classes.length) {
             const el = document.createElement('span');
-            el.className = 'syntax-' + cls;
+            el.className = classes.join(' ');
             stack[stack.length - 1].appendChild(el);
             stack.push(el);
-            i = j + openEnd.length;
+            i += match[0].length;
             continue;
           }
         }
-        // Not a valid allowed opener; treat '<' as text
+        // Not a valid allowed opener; treat '<' as text and keep moving.
         stack[stack.length - 1].appendChild(document.createTextNode('<'));
         i += 1;
         continue;
@@ -327,6 +343,11 @@ function renderHighlight(codeEl, gutterEl, value, language, options = {}) {
         continue;
       }
       const nextLt = markup.indexOf('<', i);
+      if (nextLt === i) {
+        stack[stack.length - 1].appendChild(document.createTextNode('<'));
+        i += 1;
+        continue;
+      }
       const end = nextLt === -1 ? markup.length : nextLt;
       const chunk = markup.slice(i, end);
       if (chunk) stack[stack.length - 1].appendChild(document.createTextNode(decode(chunk)));
@@ -599,7 +620,6 @@ function makeEditor(targetTextarea, language, readOnly) {
 
   const DEFAULT_LINE_HEIGHT = 20;
   const lineMetricCache = { lineH: DEFAULT_LINE_HEIGHT, padTop: 0 };
-  let selectionConnectorWidth = 0;
 
   // Auto-resize to fit content height (no inner scrollbar)
   const applyHeights = () => {
@@ -681,174 +701,6 @@ function makeEditor(targetTextarea, language, readOnly) {
     } catch (_) {
       return { lineH: lineMetricCache.lineH || DEFAULT_LINE_HEIGHT, padTop: lineMetricCache.padTop || 0 };
     }
-  }
-
-  function getEditorPadding() {
-    try {
-      const cs = window.getComputedStyle(ta);
-      const top = parseFloat(cs.paddingTop);
-      const left = parseFloat(cs.paddingLeft);
-      return {
-        top: Number.isFinite(top) ? top : 0,
-        left: Number.isFinite(left) ? left : 0
-      };
-    } catch (_) {
-      return { top: 0, left: 0 };
-    }
-  }
-
-  function getSelectionRects(value, selStart, selEnd) {
-    if (selEnd <= selStart) return [];
-    const selected = String(value || '').slice(selStart, selEnd);
-    if (!selected) return [];
-    const mirror = document.createElement('div');
-    const selectedSpan = document.createElement('span');
-    const taStyles = window.getComputedStyle(ta);
-    const contentWidth = getContentWidth() || Math.max(0, ta.clientWidth);
-    mirror.style.position = 'fixed';
-    mirror.style.left = '-10000px';
-    mirror.style.top = '0';
-    mirror.style.visibility = 'hidden';
-    mirror.style.pointerEvents = 'none';
-    mirror.style.width = `${contentWidth}px`;
-    mirror.style.minWidth = '0';
-    mirror.style.padding = '0';
-    mirror.style.margin = '0';
-    mirror.style.border = '0';
-    mirror.style.overflow = 'visible';
-    mirror.style.boxSizing = 'content-box';
-    mirror.style.fontFamily = taStyles.fontFamily;
-    mirror.style.fontSize = taStyles.fontSize;
-    mirror.style.fontWeight = taStyles.fontWeight;
-    mirror.style.fontStyle = taStyles.fontStyle;
-    mirror.style.lineHeight = taStyles.lineHeight;
-    mirror.style.letterSpacing = taStyles.letterSpacing;
-    mirror.style.tabSize = taStyles.getPropertyValue('tab-size') || taStyles.tabSize || '4';
-    mirror.style.MozTabSize = mirror.style.tabSize;
-    mirror.style.fontVariantLigatures = 'none';
-    mirror.style.fontVariantNumeric = taStyles.fontVariantNumeric || 'tabular-nums';
-    mirror.style.whiteSpace = softWrap ? 'pre-wrap' : 'pre';
-    mirror.style.wordBreak = softWrap ? 'break-word' : 'normal';
-    mirror.style.overflowWrap = softWrap ? 'break-word' : 'normal';
-    selectedSpan.textContent = selected;
-    mirror.appendChild(document.createTextNode(String(value || '').slice(0, selStart)));
-    mirror.appendChild(selectedSpan);
-    mirror.appendChild(document.createTextNode(String(value || '').slice(selEnd)));
-    document.body.appendChild(mirror);
-    try {
-      const mirrorRect = mirror.getBoundingClientRect();
-      return Array.from(selectedSpan.getClientRects())
-        .filter((rect) => rect && rect.width > 0 && rect.height > 0)
-        .map((rect) => ({
-          left: rect.left - mirrorRect.left,
-          top: rect.top - mirrorRect.top,
-          width: rect.width,
-          height: rect.height
-        }));
-    } finally {
-      document.body.removeChild(mirror);
-    }
-  }
-
-  function getSelectionConnectorWidth() {
-    if (selectionConnectorWidth > 0) return selectionConnectorWidth;
-    try {
-      const cs = window.getComputedStyle(ta);
-      const sample = document.createElement('span');
-      sample.textContent = '0';
-      sample.style.position = 'absolute';
-      sample.style.visibility = 'hidden';
-      sample.style.pointerEvents = 'none';
-      sample.style.whiteSpace = 'pre';
-      sample.style.fontFamily = cs.fontFamily;
-      sample.style.fontSize = cs.fontSize;
-      sample.style.fontWeight = cs.fontWeight;
-      sample.style.fontStyle = cs.fontStyle;
-      sample.style.letterSpacing = cs.letterSpacing;
-      sample.style.fontVariantLigatures = 'none';
-      body.appendChild(sample);
-      const width = sample.getBoundingClientRect().width;
-      body.removeChild(sample);
-      if (Number.isFinite(width) && width > 0) {
-        selectionConnectorWidth = width;
-        return width;
-      }
-    } catch (_) { /* noop */ }
-    return 7;
-  }
-
-  function getSelectionConnectorRects(value, selStart, selEnd, entries, lineHeight) {
-    if (selEnd <= selStart) return [];
-    const lines = String(value || '').split('\n');
-    if (lines.length <= 1) return [];
-    const firstRows = new Map();
-    (Array.isArray(entries) ? entries : []).forEach((entry, index) => {
-      const lineNo = Number.isFinite(entry?.line) ? entry.line : index + 1;
-      if (!firstRows.has(lineNo)) firstRows.set(lineNo, index);
-    });
-    const lh = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : DEFAULT_LINE_HEIGHT;
-    const width = getSelectionConnectorWidth();
-    const rects = [];
-    let offset = 0;
-    for (let i = 0; i < lines.length - 1; i++) {
-      const lineEnd = offset + String(lines[i] || '').length;
-      if (selStart <= lineEnd && selEnd > lineEnd) {
-        const nextLine = i + 2;
-        const row = firstRows.has(nextLine) ? firstRows.get(nextLine) : i + 1;
-        rects.push({
-          left: 0,
-          top: row * lh,
-          width,
-          height: lh,
-          connector: true
-        });
-      }
-      offset = lineEnd + 1;
-      if (offset > selEnd) break;
-    }
-    return rects;
-  }
-
-  function normalizeSelectionRects(rects, lineHeight) {
-    const lh = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : DEFAULT_LINE_HEIGHT;
-    const normalized = (Array.isArray(rects) ? rects : [])
-      .map((rect) => {
-        const top = Math.round((rect.top || 0) / lh) * lh;
-        return {
-          left: rect.left || 0,
-          top,
-          width: Math.max(1, rect.width || 0),
-          height: lh,
-          connector: !!rect.connector,
-          joinedPrev: false,
-          joinedNext: false
-        };
-      })
-      .sort((a, b) => (a.top - b.top) || (a.left - b.left));
-    const withoutRedundantConnectors = normalized.filter((rect) => {
-      if (!rect.connector) return true;
-      return !normalized.some((other) => {
-        if (other.connector || Math.abs(other.top - rect.top) > 1) return false;
-        return other.left <= rect.left + rect.width + 1;
-      });
-    });
-    const rowTops = Array.from(new Set(withoutRedundantConnectors.map((rect) => rect.top))).sort((a, b) => a - b);
-    const rows = new Set(rowTops);
-    withoutRedundantConnectors.forEach((rect) => {
-      rect.joinedPrev = rows.has(rect.top - lh);
-      rect.joinedNext = rows.has(rect.top + lh);
-    });
-    for (let i = 1; i < rowTops.length; i++) {
-      const previousTop = rowTops[i - 1];
-      const currentTop = rowTops[i];
-      if (Math.abs(currentTop - (previousTop + lh)) <= 1.5) {
-        withoutRedundantConnectors.forEach((rect) => {
-          if (rect.top === previousTop) rect.joinedNext = true;
-          if (rect.top === currentTop) rect.joinedPrev = true;
-        });
-      }
-    }
-    return withoutRedundantConnectors;
   }
 
   function findVerticalScrollParent(node) {
@@ -937,22 +789,10 @@ function makeEditor(targetTextarea, language, readOnly) {
       if (!spans.length) return;
       const hasRangeSelection = selEnd > selStart;
       if (hasRangeSelection) {
-        const padding = getEditorPadding();
-        const selectionRects = getSelectionRects(value, selStart, selEnd);
-        const connectorRects = getSelectionConnectorRects(value, selStart, selEnd, entries, lh);
-        normalizeSelectionRects(selectionRects.concat(connectorRects), lh).forEach((selectionRect) => {
-          const rect = document.createElement('div');
-          rect.className = 'hi-selection-range';
-          if (selectionRect.joinedPrev) rect.classList.add('is-joined-prev');
-          if (selectionRect.joinedNext) rect.classList.add('is-joined-next');
-          rect.style.top = `${padding.top + selectionRect.top}px`;
-          rect.style.left = `${padding.left + selectionRect.left}px`;
-          rect.style.width = `${selectionRect.width}px`;
-          rect.style.height = `${selectionRect.height}px`;
-          hlLayer.appendChild(rect);
-        });
+        // Let the native textarea paint selection ranges; it uses the same
+        // soft-wrap geometry as the caret and avoids mirror-layer drift.
+        return;
       }
-      if (hasRangeSelection) return;
       const clampedStart = Math.max(0, Math.min(startRow, spans.length - 1));
       const clampedEnd = Math.max(clampedStart, Math.min(endRow, spans.length - 1));
       const block = document.createElement('div');

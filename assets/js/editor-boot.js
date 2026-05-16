@@ -1,5 +1,5 @@
 import './cache-control.js';
-import { initI18n, t, getAvailableLangs, getLanguageLabel, getCurrentLang, switchLanguage, ensureLanguageBundle } from './i18n.js?v=20260505welcome';
+import { initI18n, t, getAvailableLangs, getLanguageLabel, getCurrentLang, switchLanguage, ensureLanguageBundle } from './i18n.js?v=press-system-v3.4.16';
 
 function applyAttributeTranslation(el, target, value) {
   if (value == null) return;
@@ -78,20 +78,20 @@ function populateLanguageSelect() {
 }
 
 try {
-  window.__nsPopulateEditorLanguageSelect = populateLanguageSelect;
-  document.addEventListener('ns-editor-language-control-mounted', populateLanguageSelect);
+  window.__pressPopulateEditorLanguageSelect = populateLanguageSelect;
+  document.addEventListener('press-editor-language-control-mounted', populateLanguageSelect);
 } catch (_) {}
 
 function applyEditorLanguage() {
   applyElementTranslations();
   populateLanguageSelect();
-  document.dispatchEvent(new CustomEvent('ns-editor-language-applied'));
+  document.dispatchEvent(new CustomEvent('press-editor-language-applied'));
 }
 
 async function bootstrap() {
   await initI18n();
   applyEditorLanguage();
-  window.__ns_softResetLang = async () => {
+  window.__press_softResetLang = async () => {
     await initI18n({ persist: false });
     applyEditorLanguage();
   };

@@ -1,9 +1,30 @@
-import { createSafeHighlightFragment, detectLanguage } from './syntax-highlight.js';
+import { renderPressMath } from './math-render.js?v=press-system-v3.4.16';
+import { createSafeHighlightFragment, detectLanguage } from './syntax-highlight.js?v=press-system-v3.4.16';
 
-const BLOCK_TYPES = new Set(['paragraph', 'heading', 'image', 'list', 'quote', 'code', 'card', 'source', 'blank']);
-const CODE_LANGUAGE_OPTIONS = ['', 'plain', 'javascript', 'json', 'python', 'html', 'xml', 'css', 'markdown', 'bash', 'shell', 'yaml', 'yml', 'robots'];
-const CODE_HIGHLIGHT_LANGUAGES = new Set(CODE_LANGUAGE_OPTIONS.filter(value => value && value !== 'plain'));
-const CODE_PLAIN_LANGUAGES = new Set(['plain', 'text', 'none', 'raw', 'nohighlight']);
+const BLOCK_TYPES = new Set(['paragraph', 'heading', 'image', 'list', 'quote', 'code', 'math', 'card', 'table', 'source', 'blank']);
+const CODE_LANGUAGE_OPTIONS = [
+  '', 'plain', 'text', 'raw', 'none', 'nohighlight',
+  'bash', 'c', 'cpp', 'csharp', 'css', 'diff', 'go', 'graphql', 'ini', 'java',
+  'javascript', 'json', 'kotlin', 'less', 'lua', 'makefile', 'markdown',
+  'objectivec', 'perl', 'php', 'php-template', 'plaintext', 'python',
+  'python-repl', 'r', 'ruby', 'rust', 'scss', 'shell', 'sql', 'swift',
+  'typescript', 'vbnet', 'wasm', 'xml', 'yaml',
+  'html', 'yml', 'robots'
+];
+const CODE_PLAIN_LANGUAGES = new Set(['plain', 'text', 'none', 'raw', 'nohighlight', 'plaintext']);
+const CODE_LANGUAGE_ALIASES = new Map([
+  ['js', 'javascript'],
+  ['ts', 'typescript'],
+  ['sh', 'bash'],
+  ['zsh', 'bash'],
+  ['html', 'xml'],
+  ['htm', 'xml'],
+  ['yml', 'yaml'],
+  ['md', 'markdown']
+]);
+const CODE_HIGHLIGHT_LANGUAGES = new Set(CODE_LANGUAGE_OPTIONS
+  .map(value => CODE_LANGUAGE_ALIASES.get(value) || value)
+  .filter(value => value && !CODE_PLAIN_LANGUAGES.has(value)));
 
 function normalizeText(value) {
   return String(value == null ? '' : value).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
@@ -130,8 +151,13 @@ function isStandaloneMediaLine(line) {
   return trimmed === text && !!(parseImageBlock(trimmed) || parseCardBlock(trimmed));
 }
 
+function isDisplayMathFenceLine(line) {
+  return lineWithoutTerminator(line).trim() === '$$';
+}
+
 function startsMarkdownBlock(line) {
   return isFenceStartLine(line)
+    || isDisplayMathFenceLine(line)
     || isHeadingLine(line)
     || isListItemLine(line)
     || isQuoteLine(line)
@@ -164,6 +190,13 @@ function extractChunks(markdown) {
         const candidate = lines[index] || '';
         index += 1;
         if (isFenceEndLine(candidate, fence)) break;
+      }
+    } else if (isDisplayMathFenceLine(first)) {
+      index += 1;
+      while (index < lines.length) {
+        const candidate = lines[index] || '';
+        index += 1;
+        if (isDisplayMathFenceLine(candidate)) break;
       }
     } else if (isHeadingLine(first) || isStandaloneMediaLine(first)) {
       index += 1;
@@ -234,6 +267,16 @@ function parseCodeBlock(raw) {
   return {
     lang: (open.info || '').trim(),
     text: lines.slice(1, -1).join('\n')
+  };
+}
+
+function parseMathBlock(raw) {
+  const lines = normalizeText(raw).split('\n');
+  if (lines.length < 2) return null;
+  if (!isDisplayMathFenceLine(lines[0])) return null;
+  if (!isDisplayMathFenceLine(lines[lines.length - 1])) return null;
+  return {
+    tex: lines.slice(1, -1).join('\n')
   };
 }
 
@@ -368,6 +411,57 @@ function parseQuoteBlock(raw) {
   return { text: lines.map(line => line.replace(/^>\s?/, '')).join('\n') };
 }
 
+const TABLE_ALIGNMENTS = new Set(['', 'left', 'center', 'right']);
+
+function normalizeTableAlignment(value) {
+  const align = String(value || '').trim().toLowerCase();
+  return TABLE_ALIGNMENTS.has(align) ? align : '';
+}
+
+function normalizeTableCellValue(value) {
+  return String(value == null ? '' : value)
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\|/g, ' ')
+    .trim();
+}
+
+function splitPipeTableRow(line) {
+  const text = lineWithoutTerminator(line).trim();
+  if (!text.startsWith('|') || !text.endsWith('|')) return null;
+  if (/\\\|/.test(text)) return null;
+  return text.slice(1, -1).split('|').map(cell => String(cell || '').trim());
+}
+
+function parsePipeTableSeparatorCells(cells) {
+  if (!Array.isArray(cells) || !cells.length) return null;
+  const alignments = [];
+  for (const cell of cells) {
+    const match = String(cell || '').trim().match(/^(:)?-{3,}(:)?$/);
+    if (!match) return null;
+    const left = !!match[1];
+    const right = !!match[2];
+    alignments.push(left && right ? 'center' : (right ? 'right' : (left ? 'left' : '')));
+  }
+  return alignments;
+}
+
+function parseTableBlock(raw) {
+  const lines = normalizeText(raw).split('\n');
+  if (lines.length < 3 || lines.some(line => isBlankLine(line))) return null;
+  const headers = splitPipeTableRow(lines[0]);
+  if (!headers || !headers.length) return null;
+  const alignments = parsePipeTableSeparatorCells(splitPipeTableRow(lines[1]));
+  if (!alignments || alignments.length !== headers.length) return null;
+  const rows = [];
+  for (const line of lines.slice(2)) {
+    const cells = splitPipeTableRow(line);
+    if (!cells || cells.length > headers.length) return null;
+    rows.push([...cells, ...Array(Math.max(0, headers.length - cells.length)).fill('')]);
+  }
+  if (!rows.length) return null;
+  return { headers, alignments, rows };
+}
+
 function maskInlineCodeSpans(raw) {
   const text = String(raw || '');
   let output = '';
@@ -428,6 +522,10 @@ function classifyChunk(raw, data = {}) {
   if (code) return makeBlock('code', text, { ...data, ...code });
   if (parseFenceStartLine(trimmed.split('\n')[0])) return makeSourceBlock(text, data, 'unclosedFence');
 
+  const math = parseMathBlock(text);
+  if (math) return makeBlock('math', text, { ...data, ...math });
+  if (isDisplayMathFenceLine(trimmed.split('\n')[0])) return makeSourceBlock(text, data, 'unclosedMath');
+
   const heading = text.match(/^(#{1,6})\s+(.+)$/);
   if (heading) {
     return makeBlock('heading', text, { ...data, level: heading[1].length, text: heading[2] || '' });
@@ -438,6 +536,9 @@ function classifyChunk(raw, data = {}) {
 
   const card = parseCardBlock(trimmed);
   if (card && trimmed === text) return makeBlock('card', text, { ...data, ...card });
+
+  const table = parseTableBlock(text);
+  if (table) return makeBlock('table', text, { ...data, ...table });
 
   const quote = parseQuoteBlock(text);
   if (quote) return makeBlock('quote', text, { ...data, ...quote });
@@ -611,6 +712,51 @@ function serializeCard(data = {}) {
   return `[${label}](?id=${location || 'post/example.md'}${title})`;
 }
 
+function tableColumnCount(data = {}) {
+  const headers = Array.isArray(data.headers) ? data.headers : [];
+  const alignments = Array.isArray(data.alignments) ? data.alignments : [];
+  const rows = Array.isArray(data.rows) ? data.rows : [];
+  return Math.max(
+    1,
+    headers.length,
+    alignments.length,
+    ...rows.map(row => Array.isArray(row) ? row.length : 0)
+  );
+}
+
+function editableTableData(data = {}) {
+  const columns = tableColumnCount(data);
+  const hasHeaders = Array.isArray(data.headers) && data.headers.length;
+  const headers = Array.from({ length: columns }, (_, index) => (
+    hasHeaders ? normalizeTableCellValue(data.headers[index] || '') : `Column ${index + 1}`
+  ));
+  const alignments = Array.from({ length: columns }, (_, index) => normalizeTableAlignment(Array.isArray(data.alignments) ? data.alignments[index] : ''));
+  const rawRows = Array.isArray(data.rows) && data.rows.length ? data.rows : [Array(columns).fill('')];
+  const rows = rawRows.map(row => Array.from({ length: columns }, (_, index) => normalizeTableCellValue(Array.isArray(row) ? row[index] : '')));
+  return { headers, alignments, rows };
+}
+
+function tableSeparatorCell(align) {
+  const normalized = normalizeTableAlignment(align);
+  if (normalized === 'left') return ':---';
+  if (normalized === 'center') return ':---:';
+  if (normalized === 'right') return '---:';
+  return '---';
+}
+
+function serializeTableRow(cells) {
+  return `| ${cells.map(cell => normalizeTableCellValue(cell)).join(' | ')} |`;
+}
+
+function serializeTable(data = {}) {
+  const table = editableTableData(data);
+  return [
+    serializeTableRow(table.headers),
+    serializeTableRow(table.alignments.map(tableSeparatorCell)),
+    ...table.rows.map(serializeTableRow)
+  ].join('\n');
+}
+
 function codeFenceForText(text) {
   const runs = String(text || '').match(/`+/g) || [];
   const longest = runs.reduce((max, run) => Math.max(max, run.length), 0);
@@ -663,8 +809,12 @@ function serializeBlock(block) {
       const fence = codeFenceForText(text);
       return `${fence}${lang}\n${text}\n${fence}`;
     }
+    case 'math':
+      return `$$\n${String(data.tex || '')}\n$$`;
     case 'card':
       return serializeCard(data);
+    case 'table':
+      return serializeTable(data);
     case 'source':
       return String(data.text != null ? data.text : block.raw || '');
     case 'paragraph':
@@ -697,8 +847,13 @@ export function isBlockEmptyForBackspace(block) {
   if (block.type === 'blank') return true;
   if (block.type === 'paragraph' || block.type === 'heading' || block.type === 'quote') return blank(data.text);
   if (block.type === 'code' || block.type === 'source') return blank(data.text != null ? data.text : block.raw);
+  if (block.type === 'math') return blank(data.tex);
   if (block.type === 'image') return blank(data.src) && blank(data.alt) && blank(data.title);
   if (block.type === 'card') return blank(data.location) && blank(data.label) && blank(data.title);
+  if (block.type === 'table') {
+    const table = editableTableData(data);
+    return table.headers.every(blank) && table.rows.every(row => row.every(blank));
+  }
   if (block.type === 'list') {
     return editableListItems(data.items).every(item => blank(item && item.text) && !item.checked);
   }
@@ -853,21 +1008,25 @@ function escapeHtml(value) {
 
 function inlineRun(text, marks = {}) {
   const link = marks.link ? sanitizeEditorLinkHref(marks.link) : '';
+  const math = !!marks.math;
   const run = {
     text: String(text == null ? '' : text),
     bold: !!marks.bold,
     italic: !!marks.italic,
     strike: !!marks.strike,
     code: !!marks.code,
+    math,
     link,
     linkTitle: link ? sanitizeEditorLinkTitle(marks.linkTitle) : ''
   };
-  if (run.code) {
+  if (run.code || run.math) {
     run.bold = false;
     run.italic = false;
     run.strike = false;
     run.link = '';
     run.linkTitle = '';
+    if (run.code) run.math = false;
+    if (run.math) run.code = false;
   }
   return run;
 }
@@ -877,6 +1036,7 @@ function sameInlineMarks(a = {}, b = {}) {
     && !!a.italic === !!b.italic
     && !!a.strike === !!b.strike
     && !!a.code === !!b.code
+    && !!a.math === !!b.math
     && String(a.link || '') === String(b.link || '')
     && String(a.linkTitle || '') === String(b.linkTitle || '');
 }
@@ -934,6 +1094,16 @@ function findInlineLink(input, start) {
     title: parsed.title,
     end: hrefEnd + 1
   };
+}
+
+function findInlineMath(input, start) {
+  const text = String(input || '');
+  if (!text.startsWith('\\(', start)) return null;
+  const end = findUnescaped(text, '\\)', start + 2);
+  if (end <= start + 2) return null;
+  const tex = text.slice(start + 2, end).trim();
+  if (!tex) return null;
+  return { tex, end: end + 2 };
 }
 
 function findMarkdownLinkLabelEnd(input, start) {
@@ -1069,6 +1239,12 @@ function parseInlineRunsInternal(input, marks = {}) {
 
   while (index < text.length) {
     if (text[index] === '\\' && index + 1 < text.length) {
+      const math = findInlineMath(text, index);
+      if (math) {
+        appendInlineRun(runs, math.tex, { math: true });
+        index = math.end;
+        continue;
+      }
       if (isMarkdownEscapablePunctuation(text[index + 1])) {
         appendInlineRun(runs, text[index + 1], marks);
         index += 2;
@@ -1160,6 +1336,7 @@ function linkTitleForRun(run) {
 function serializeInlineRun(run) {
   const text = String(run && run.text != null ? run.text : '');
   if (!text) return '';
+  if (run && run.math) return `\\(${text}\\)`;
   if (run && run.code) return serializeMarkdownCodeSpan(text);
   let out = escapeMarkdownInline(text);
   if (run && run.italic) out = `_${out}_`;
@@ -1174,6 +1351,18 @@ export function serializeInlineRuns(runs) {
 }
 
 function appendInlineNode(parent, run) {
+  if (run && run.math) {
+    const span = document.createElement('span');
+    span.className = 'press-math press-math-inline blocks-inline-math';
+    span.contentEditable = 'false';
+    span.dataset.tex = String(run.text || '');
+    span.setAttribute('data-tex', String(run.text || ''));
+    span.setAttribute('role', 'button');
+    span.setAttribute('tabindex', '-1');
+    span.textContent = String(run.text || '');
+    parent.appendChild(span);
+    return;
+  }
   const textNode = document.createTextNode(String(run && run.text != null ? run.text : ''));
   let node = textNode;
   const wrap = (tagName, attrs = {}) => {
@@ -1203,12 +1392,17 @@ function renderInlineRunsInto(root, runs) {
       if (line) appendInlineNode(root, { ...run, text: line });
     });
   });
+  try { renderPressMath(root); } catch (_) {}
 }
 
 function inlineRunsFromDom(root) {
   const runs = [];
   const walk = (node, marks = {}) => {
     if (!node) return;
+    if (node.nodeType === 1 && node.matches && node.matches('.press-math[data-tex]')) {
+      appendInlineRun(runs, node.getAttribute('data-tex') || node.dataset.tex || '', { math: true });
+      return;
+    }
     if (node.nodeType === 3) {
       appendInlineRun(runs, node.nodeValue || '', marks);
       return;
@@ -1260,6 +1454,8 @@ const BLOCK_TYPE_ICON_PATHS = {
   list: '<path d="M3 5h.01" /><path d="M3 12h.01" /><path d="M3 19h.01" /><path d="M8 5h13" /><path d="M8 12h13" /><path d="M8 19h13" />',
   quote: '<path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" /><path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" />',
   code: '<path d="m18 16 4-4-4-4" /><path d="m6 8-4 4 4 4" /><path d="m14.5 4-5 16" />',
+  math: '<path d="M4 19h16" /><path d="M8 5h8" /><path d="M9 5c4 4 4 10 0 14" /><path d="M15 5c-4 4-4 10 0 14" />',
+  table: '<path d="M3 5h18" /><path d="M3 12h18" /><path d="M3 19h18" /><path d="M5 5v14" /><path d="M12 5v14" /><path d="M19 5v14" />',
   source: '<path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" /><path d="M14 2v5a1 1 0 0 0 1 1h5" /><path d="M10 12.5 8 15l2 2.5" /><path d="m14 12.5 2 2.5-2 2.5" />',
   card: '<path d="M15 18h-5" /><path d="M18 14h-8" /><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-4 0v-9a2 2 0 0 1 2-2h2" /><rect width="8" height="4" x="10" y="6" rx="1" />',
   blank: '<path d="M5 6h14" /><path d="M5 18h14" /><path d="M12 10v4" /><path d="M10 12h4" />'
@@ -1278,22 +1474,48 @@ function inputValue(input) {
   return input ? String(input.value || '') : '';
 }
 
+function plainEditableValue(editable) {
+  return String(editable && editable.textContent != null ? editable.textContent : '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[\r\n]+/g, ' ');
+}
+
+function insertPlainTextIntoEditable(editable, text) {
+  if (!editable) return false;
+  const value = String(text == null ? '' : text);
+  try {
+    const sel = window.getSelection && window.getSelection();
+    if (!sel || !sel.rangeCount) return false;
+    const range = sel.getRangeAt(0);
+    if (!nodeContains(editable, range.startContainer) || !nodeContains(editable, range.endContainer)) return false;
+    range.deleteContents();
+    const node = document.createTextNode(value);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function resolveCodeHighlightLanguage(language, codeText) {
   const raw = String(language || '').trim();
   const normalized = raw.toLowerCase();
+  const resolved = CODE_LANGUAGE_ALIASES.get(normalized) || normalized;
   if (CODE_PLAIN_LANGUAGES.has(normalized)) {
     return { language: 'plain', label: 'PLAIN', highlight: false };
   }
-  if (CODE_HIGHLIGHT_LANGUAGES.has(normalized)) {
-    return { language: normalized, label: normalized.toUpperCase(), highlight: true };
-  }
-  if (normalized === 'htm') {
-    return { language: 'html', label: 'HTML', highlight: true };
+  if (CODE_HIGHLIGHT_LANGUAGES.has(resolved)) {
+    return { language: resolved, label: resolved.toUpperCase(), highlight: true };
   }
   if (!normalized) {
     const detected = String(detectLanguage(String(codeText || '')) || '').toLowerCase();
-    if (CODE_HIGHLIGHT_LANGUAGES.has(detected)) {
-      return { language: detected, label: detected.toUpperCase(), highlight: true };
+    const detectedResolved = CODE_LANGUAGE_ALIASES.get(detected) || detected;
+    if (CODE_HIGHLIGHT_LANGUAGES.has(detectedResolved)) {
+      return { language: detectedResolved, label: detectedResolved.toUpperCase(), highlight: true };
     }
   }
   return { language: 'plain', label: 'PLAIN', highlight: false };
@@ -2061,13 +2283,21 @@ function selectionEditableInRoot(root) {
 }
 
 function inlineMarksFromDomNode(node, editable) {
-  const marks = { bold: false, italic: false, strike: false, code: false, link: '' };
+  const marks = { bold: false, italic: false, strike: false, code: false, math: false, link: '' };
   try {
     let current = node && node.nodeType === 1 ? node : node && node.parentElement;
     while (current && nodeContains(editable, current)) {
       const tag = String(current.tagName || '').toLowerCase();
-      if (tag === 'code') {
+      if (current.matches && current.matches('.press-math[data-tex]')) {
+        marks.math = true;
+        marks.code = false;
+        marks.bold = false;
+        marks.italic = false;
+        marks.strike = false;
+        marks.link = '';
+      } else if (tag === 'code') {
         marks.code = true;
+        marks.math = false;
         marks.bold = false;
         marks.italic = false;
         marks.strike = false;
@@ -2105,6 +2335,38 @@ function inlineMarksFromPointerEvent(event, editable) {
 function textRangeForDomNode(editable, node) {
   try {
     if (!editable || !node || !nodeContains(editable, node)) return null;
+    if (node.nodeType === 1 && node.matches && node.matches('.press-math[data-tex]')) {
+      let start = 0;
+      let found = false;
+      const count = (current) => {
+        if (!current || found) return;
+        if (current === node) {
+          found = true;
+          return;
+        }
+        if (current.nodeType === 3) {
+          start += String(current.nodeValue || '').length;
+          return;
+        }
+        if (current.nodeType !== 1) return;
+        const tag = String(current.tagName || '').toLowerCase();
+        if (tag === 'br') {
+          start += 1;
+          return;
+        }
+        if (current.matches && current.matches('.press-math[data-tex]')) {
+          start += String(current.getAttribute('data-tex') || current.dataset.tex || '').length;
+          return;
+        }
+        Array.from(current.childNodes || []).forEach(count);
+        if (tag === 'div') start += 1;
+      };
+      Array.from(editable.childNodes || []).forEach(count);
+      if (found) {
+        const length = String(node.getAttribute('data-tex') || node.dataset.tex || '').length;
+        return length > 0 ? { start, end: start + length } : null;
+      }
+    }
     const beforeRange = document.createRange();
     beforeRange.selectNodeContents(editable);
     beforeRange.setEndBefore(node);
@@ -2134,9 +2396,15 @@ function linkForTextRange(editable, start, end) {
 
 function inlineMarkedDomRangeFromNode(editable, node, mark) {
   const command = mark === 'strikeThrough' ? 'strike' : mark;
-  if (command !== 'code') return null;
-  const code = closestElement(node, 'code');
-  return code && nodeContains(editable, code) ? textRangeForDomNode(editable, code) : null;
+  if (command === 'code') {
+    const code = closestElement(node, 'code');
+    return code && nodeContains(editable, code) ? textRangeForDomNode(editable, code) : null;
+  }
+  if (command === 'math') {
+    const math = closestElement(node, '.press-math[data-tex]');
+    return math && nodeContains(editable, math) ? textRangeForDomNode(editable, math) : null;
+  }
+  return null;
 }
 
 function inlineMarkedDomRangeFromSelection(editable, mark) {
@@ -2175,6 +2443,23 @@ function selectionLinkInEditable(editable) {
     for (const candidate of candidates) {
       const link = closestElement(candidate, 'a[href]');
       if (link && nodeContains(editable, link)) return link;
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function selectionMathInEditable(editable) {
+  try {
+    const sel = window.getSelection && window.getSelection();
+    if (!editable || !sel || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    if (!nodeContains(editable, range.commonAncestorContainer)) return null;
+    const candidates = [range.startContainer, range.endContainer, range.commonAncestorContainer];
+    for (const candidate of candidates) {
+      const math = closestElement(candidate, '.press-math[data-tex]');
+      if (math && nodeContains(editable, math)) return math;
     }
     return null;
   } catch (_) {
@@ -2327,8 +2612,8 @@ function inlineRangeAnyMarked(runs, start, end, mark) {
 function removeInlineMarkInRange(runs, start, end, mark) {
   const command = mark === 'strikeThrough' ? 'strike' : mark;
   return mutateInlineRunsInRange(runs, start, end, run => {
-    if (command === 'code') return inlineRun(run.text, {});
-    if (run.code) return run;
+    if (command === 'code' || command === 'math') return inlineRun(run.text, {});
+    if (run.code || run.math) return run;
     return inlineRun(run.text, { ...run, [command]: command === 'link' ? '' : false, ...(command === 'link' ? { linkTitle: '' } : {}) });
   });
 }
@@ -2343,14 +2628,14 @@ export function toggleInlineMarkOnRuns(runs, start, end, mark) {
     : !inlineRangeAnyMarked(runs, start, end, command);
   return mutateInlineRunsInRange(runs, start, end, run => {
     if (command === 'code') return shouldApply ? inlineRun(run.text, { code: true }) : inlineRun(run.text, {});
-    if (run.code) return run;
+    if (run.code || run.math) return run;
     return inlineRun(run.text, { ...run, [command]: shouldApply });
   });
 }
 
 export function removeInlineMarkAroundOffset(runs, offset, mark) {
   const command = mark === 'strikeThrough' ? 'strike' : mark;
-  if (!['bold', 'italic', 'strike', 'code', 'link'].includes(command)) return mergeInlineRuns(runs);
+  if (!['bold', 'italic', 'strike', 'code', 'math', 'link'].includes(command)) return mergeInlineRuns(runs);
   const range = inlineMarkedRangeAtOffset(runs, offset, command);
   if (!range) return mergeInlineRuns(runs);
   return removeInlineMarkInRange(runs, range.start, range.end, command);
@@ -2397,9 +2682,61 @@ export function applyInlineLinkToRuns(runs, start, end, href, replacementText = 
     return insertInlineRunsAtRange(runs, safeStart, safeEnd, replacement.text ? [replacement] : []);
   }
   return mutateInlineRunsInRange(runs, safeStart, safeEnd, run => {
-    if (run.code) return run;
+    if (run.code || run.math) return run;
     return inlineRun(run.text, { ...run, link: safeHref, linkTitle: safeTitle });
   });
+}
+
+export function applyInlineMathToRuns(runs, start, end, tex) {
+  const source = String(tex == null ? '' : tex).trim();
+  const safeStart = Math.max(0, Number(start) || 0);
+  const safeEnd = Math.max(safeStart, Number(end) || 0);
+  if (!source) return insertInlineRunsAtRange(runs, safeStart, safeEnd, []);
+  return insertInlineRunsAtRange(runs, safeStart, safeEnd, [inlineRun(source, { math: true })]);
+}
+
+function editableTextOffsetForDomPosition(root, container, offset) {
+  let total = 0;
+  let found = false;
+  const countNode = (node) => {
+    if (!node || found) return;
+    if (node === container) {
+      if (node.nodeType === 3) {
+        total += Math.max(0, Math.min(String(node.nodeValue || '').length, Number(offset) || 0));
+      } else if (node.nodeType === 1) {
+        const children = Array.from(node.childNodes || []);
+        children.slice(0, Math.max(0, Math.min(children.length, Number(offset) || 0))).forEach(countWholeNode);
+      }
+      found = true;
+      return;
+    }
+    countWholeNode(node);
+  };
+  const countWholeNode = (node) => {
+    if (!node || found) return;
+    if (node === container) {
+      countNode(node);
+      return;
+    }
+    if (node.nodeType === 3) {
+      total += String(node.nodeValue || '').length;
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const tag = String(node.tagName || '').toLowerCase();
+    if (tag === 'br') {
+      total += 1;
+      return;
+    }
+    if (node.matches && node.matches('.press-math[data-tex]')) {
+      total += String(node.getAttribute('data-tex') || node.dataset.tex || '').length;
+      return;
+    }
+    Array.from(node.childNodes || []).forEach(countNode);
+    if (!found && tag === 'div') total += 1;
+  };
+  Array.from(root && root.childNodes ? root.childNodes : []).forEach(countNode);
+  return found ? total : null;
 }
 
 function getEditableSelectionOffsets(el) {
@@ -2408,14 +2745,20 @@ function getEditableSelectionOffsets(el) {
     if (!el || !sel || !sel.rangeCount) return null;
     const range = sel.getRangeAt(0);
     if (!nodeContains(el, range.startContainer) || !nodeContains(el, range.endContainer)) return null;
-    const startRange = document.createRange();
-    startRange.selectNodeContents(el);
-    startRange.setEnd(range.startContainer, range.startOffset);
-    const endRange = document.createRange();
-    endRange.selectNodeContents(el);
-    endRange.setEnd(range.endContainer, range.endOffset);
-    const start = String(startRange.toString() || '').length;
-    const end = String(endRange.toString() || '').length;
+    const customStart = editableTextOffsetForDomPosition(el, range.startContainer, range.startOffset);
+    const customEnd = editableTextOffsetForDomPosition(el, range.endContainer, range.endOffset);
+    let start = customStart;
+    let end = customEnd;
+    if (start == null || end == null) {
+      const startRange = document.createRange();
+      startRange.selectNodeContents(el);
+      startRange.setEnd(range.startContainer, range.startOffset);
+      const endRange = document.createRange();
+      endRange.selectNodeContents(el);
+      endRange.setEnd(range.endContainer, range.endOffset);
+      start = String(startRange.toString() || '').length;
+      end = String(endRange.toString() || '').length;
+    }
     return { start, end, collapsed: start === end, text: String(range.toString() || ''), range };
   } catch (_) {
     return null;
@@ -2435,10 +2778,15 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     activeLinkHoldUntil: 0,
     linkEditMode: '',
     linkSelection: null,
+    activeMath: null,
+    activeMathBlockId: '',
+    mathEditMode: '',
+    mathSelection: null,
     lastInlineMarks: null,
     lastInlineMarkedRange: null,
     pendingInline: {},
     pendingListFocus: null,
+    activeTableCell: null,
     suppressNextBlockContainerClickUntil: 0,
     suppressLinkEditorRefreshUntil: 0,
     suppressSelectionActiveRecoveryUntil: 0,
@@ -2543,7 +2891,7 @@ export function createMarkdownBlocksEditor(root, options = {}) {
       if (!blockEl) return;
       const index = nodes.indexOf(blockEl);
       const body = blockEl.querySelector('.blocks-block-body');
-      const editable = body ? body.querySelector('.blocks-rich-editable, .blocks-code-preview code[contenteditable="true"], .blocks-source-textarea') : null;
+      const editable = body ? body.querySelector('.blocks-rich-editable, .blocks-table-cell-input, .blocks-code-preview code[contenteditable="true"], .blocks-image-caption, .blocks-source-textarea') : null;
       if (!editable) {
         try { blockEl.focus({ preventScroll: true }); }
         catch (_) {
@@ -3260,7 +3608,25 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     } catch (_) {}
   };
 
+  const positionPopupAtRect = (popup, rect) => {
+    try {
+      if (!popup || !rect) return;
+      const rootRect = root.getBoundingClientRect();
+      const editorRect = popup.getBoundingClientRect();
+      const gap = 6;
+      const minLeft = 0;
+      const maxLeft = Math.max(minLeft, rootRect.width - editorRect.width);
+      const nextLeft = Math.min(maxLeft, Math.max(minLeft, rect.left - rootRect.left));
+      popup.style.left = `${nextLeft}px`;
+      popup.style.top = `${rect.bottom - rootRect.top + gap}px`;
+    } catch (_) {}
+  };
+
   let refreshLinkEditor = () => {};
+  let refreshMathIn = () => {};
+  let openMathEditorForSelection = () => {};
+  let openMathEditorForNode = () => {};
+  let openMathEditorForBlock = () => {};
 
   const setActive = (index, editable = null, sync = null) => {
     const maxIndex = state.blocks.length - 1;
@@ -3304,6 +3670,7 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     syncActiveListTypeSelect(blockNodes);
     refreshLinkEditor();
     updateInlineToolbarState();
+    syncActiveTableAlignmentFromEditable(activeBlock, editable || state.activeEditable || document.activeElement);
     requestStickyBlockHeadUpdate();
   };
 
@@ -3347,6 +3714,7 @@ export function createMarkdownBlocksEditor(root, options = {}) {
       'textarea',
       'label',
       'a[href]',
+      '.blocks-image-caption',
       '[contenteditable="true"]'
     ].join(','));
   };
@@ -3387,7 +3755,7 @@ export function createMarkdownBlocksEditor(root, options = {}) {
           sync: editableSyncMap.get(editable) || null
         });
       });
-      const editables = blockEl.querySelectorAll('.blocks-rich-editable:not(.blocks-list-text), .blocks-code-preview code[contenteditable="true"], .blocks-source-textarea');
+      const editables = blockEl.querySelectorAll('.blocks-rich-editable:not(.blocks-list-text), .blocks-code-preview code[contenteditable="true"], .blocks-image-caption, .blocks-source-textarea');
       editables.forEach(editable => {
         candidates.push({
           editable,
@@ -3420,8 +3788,11 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     if (!blockEl) return null;
     const listTexts = Array.from(blockEl.querySelectorAll('.blocks-list-item .blocks-list-text'));
     const listTarget = listTexts.length ? (edge === 'last' ? listTexts[listTexts.length - 1] : listTexts[0]) : null;
+    const tableCells = Array.from(blockEl.querySelectorAll('.blocks-table-cell-input'));
+    const tableTarget = tableCells.length ? (edge === 'last' ? tableCells[tableCells.length - 1] : tableCells[0]) : null;
     const editable = listTarget
-      || blockEl.querySelector('.blocks-rich-editable:not(.blocks-list-text), .blocks-code-preview code[contenteditable="true"], .blocks-source-textarea');
+      || tableTarget
+      || blockEl.querySelector('.blocks-rich-editable:not(.blocks-list-text), .blocks-code-preview code[contenteditable="true"], .blocks-image-caption, .blocks-source-textarea');
     if (editable) {
       return {
         blockEl,
@@ -3727,6 +4098,10 @@ export function createMarkdownBlocksEditor(root, options = {}) {
       openLinkEditorForSelection();
       return;
     }
+    if (kind === 'math') {
+      openMathEditorForSelection();
+      return;
+    }
     const offsets = getEditableSelectionOffsets(editable);
     const runs = inlineRunsFromDom(editable);
     const mark = inlineCommandMark(kind);
@@ -3769,7 +4144,8 @@ export function createMarkdownBlocksEditor(root, options = {}) {
   const inlineControls = [
     ['B', 'bold', 'inlineBold', 'Bold'],
     ['I', 'italic', 'inlineItalic', 'Italic'],
-    ['Link', 'link', 'inlineLink', 'Link']
+    ['Link', 'link', 'inlineLink', 'Link'],
+    ['∑', 'math', 'inlineMath', 'Math']
   ];
   const inlineMoreControls = [
     ['S', 'strikeThrough', 'inlineStrike', 'Strikethrough'],
@@ -4019,6 +4395,168 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     updateInlineToolbarState();
   };
 
+  const mathEditor = document.createElement('div');
+  mathEditor.className = 'blocks-math-editor';
+  mathEditor.hidden = true;
+  mathEditor.setAttribute('aria-hidden', 'true');
+  const mathSource = document.createElement('textarea');
+  mathSource.className = 'blocks-math-source';
+  mathSource.rows = 3;
+  mathSource.placeholder = text('mathSource', 'LaTeX source');
+  mathSource.setAttribute('aria-label', text('mathSource', 'LaTeX source'));
+  const removeMath = button(text('removeMath', 'Remove'), 'blocks-inline-btn blocks-remove-math-btn');
+  removeMath.title = text('removeMath', 'Remove');
+  removeMath.setAttribute('aria-label', text('removeMath', 'Remove'));
+  const mathEditorFocused = () => {
+    try { return mathEditor.contains(document.activeElement); } catch (_) { return false; }
+  };
+  const hideMathEditor = () => {
+    state.activeMath = null;
+    state.activeMathBlockId = '';
+    state.mathEditMode = '';
+    state.mathSelection = null;
+    mathEditor.hidden = true;
+    mathEditor.setAttribute('aria-hidden', 'true');
+  };
+  const syncMathSourceHeight = () => {
+    try {
+      mathSource.style.height = 'auto';
+      mathSource.style.height = `${mathSource.scrollHeight}px`;
+    } catch (_) {}
+  };
+  const syncMathNodePreview = (node, tex) => {
+    if (!node) return;
+    node.dataset.pressMathRendered = '';
+    node.dataset.tex = String(tex || '');
+    node.setAttribute('data-tex', String(tex || ''));
+    node.textContent = String(tex || '');
+    try { renderPressMath(node.parentElement || node); } catch (_) {}
+  };
+  const mathBlockById = (id) => state.blocks.find(block => block && block.id === id && block.type === 'math') || null;
+  const applyMathEditor = () => {
+    const tex = inputValue(mathSource).trim();
+    if (state.mathEditMode === 'block') {
+      const block = mathBlockById(state.activeMathBlockId);
+      if (!block) return;
+      updateFromControl(block, { tex });
+      const blockEl = list.querySelector(`.blocks-block[data-block-id="${block.id}"]`);
+      const node = blockEl ? blockEl.querySelector('.press-math-display') : null;
+      syncMathNodePreview(node, tex);
+      return;
+    }
+    if (state.mathEditMode === 'range') {
+      const selection = state.mathSelection;
+      if (!selection || !selection.editable || !nodeContains(root, selection.editable)) return;
+      const nextRuns = applyInlineMathToRuns(inlineRunsFromDom(selection.editable), selection.start, selection.end, tex);
+      const nextEnd = selection.start + tex.length;
+      renderInlineRunsInto(selection.editable, nextRuns);
+      state.mathSelection = { ...selection, end: nextEnd, text: tex };
+      syncActiveEditable();
+      updateInlineToolbarState();
+      return;
+    }
+    const math = state.activeMath;
+    if (!math || !state.activeEditable || !nodeContains(state.activeEditable, math)) return;
+    const mathRange = textRangeForDomNode(state.activeEditable, math);
+    if (!mathRange) return;
+    const nextRuns = applyInlineMathToRuns(inlineRunsFromDom(state.activeEditable), mathRange.start, mathRange.end, tex);
+    renderInlineRunsInto(state.activeEditable, nextRuns);
+    state.activeMath = null;
+    syncActiveEditable();
+    updateInlineToolbarState();
+  };
+  mathSource.addEventListener('input', () => {
+    applyMathEditor();
+    syncMathSourceHeight();
+  });
+  removeMath.addEventListener('mousedown', (event) => event.preventDefault());
+  removeMath.addEventListener('click', () => {
+    mathSource.value = '';
+    applyMathEditor();
+    hideMathEditor();
+    updateInlineToolbarState();
+  });
+  openMathEditorForNode = (mathNode) => {
+    if (!mathNode || !state.activeEditable || !nodeContains(state.activeEditable, mathNode)) return;
+    const mathRange = textRangeForDomNode(state.activeEditable, mathNode);
+    if (!mathRange) return;
+    const tex = mathNode.getAttribute('data-tex') || mathNode.dataset.tex || '';
+    state.activeMath = mathNode;
+    state.activeMathBlockId = '';
+    state.mathEditMode = 'range';
+    state.mathSelection = {
+      editable: state.activeEditable,
+      start: mathRange.start,
+      end: mathRange.end,
+      text: tex,
+      anchorRect: mathNode.getBoundingClientRect()
+    };
+    mathSource.value = tex;
+    mathEditor.hidden = false;
+    mathEditor.setAttribute('aria-hidden', 'false');
+    positionPopupAtRect(mathEditor, mathNode.getBoundingClientRect());
+    syncMathSourceHeight();
+    setTimeout(() => {
+      try { mathSource.focus(); mathSource.select(); } catch (_) {}
+    }, 0);
+    updateInlineToolbarState();
+  };
+  openMathEditorForSelection = () => {
+    const editable = state.activeEditable;
+    if (!editable || !nodeContains(root, editable)) return;
+    const existingMath = selectionMathInEditable(editable);
+    if (existingMath) {
+      openMathEditorForNode(existingMath);
+      return;
+    }
+    const offsets = getEditableSelectionOffsets(editable);
+    if (!offsets) return;
+    const anchorRect = selectionAnchorRect(editable, offsets);
+    const initial = offsets.collapsed ? '' : offsets.text;
+    state.activeMath = null;
+    state.activeMathBlockId = '';
+    state.mathEditMode = 'range';
+    state.mathSelection = { editable, start: offsets.start, end: offsets.end, text: initial, anchorRect };
+    mathSource.value = initial;
+    mathEditor.hidden = false;
+    mathEditor.setAttribute('aria-hidden', 'false');
+    positionPopupAtRect(mathEditor, anchorRect);
+    syncMathSourceHeight();
+    setTimeout(() => {
+      try { mathSource.focus(); mathSource.select(); } catch (_) {}
+    }, 0);
+    updateInlineToolbarState();
+  };
+  openMathEditorForBlock = (block, blockEl = null) => {
+    if (!block || block.type !== 'math') return;
+    state.activeMath = null;
+    state.activeMathBlockId = block.id;
+    state.mathEditMode = 'block';
+    state.mathSelection = null;
+    mathSource.value = block.data.tex || '';
+    mathEditor.hidden = false;
+    mathEditor.setAttribute('aria-hidden', 'false');
+    const target = blockEl || list.querySelector(`.blocks-block[data-block-id="${block.id}"]`);
+    const preview = target ? target.querySelector('.press-math-display') : null;
+    positionPopupAtRect(mathEditor, (preview || target || root).getBoundingClientRect());
+    syncMathSourceHeight();
+    setTimeout(() => {
+      try { mathSource.focus(); mathSource.select(); } catch (_) {}
+    }, 0);
+  };
+  const isMathEditorInternalTarget = (target) => {
+    if (nodeContains(mathEditor, target)) return true;
+    const math = closestElement(target, '.press-math[data-tex]');
+    return !!(math && nodeContains(root, math));
+  };
+  const handleMathEditorOutsidePointer = (event) => {
+    if (mathEditor.hidden) return;
+    const target = event && event.target;
+    if (!target || isMathEditorInternalTarget(target)) return;
+    hideMathEditor();
+    updateInlineToolbarState();
+  };
+
   updateInlineToolbarState = () => {
     const buttons = root.querySelectorAll('[data-inline-command]');
     if (!buttons.length) return;
@@ -4069,6 +4607,9 @@ export function createMarkdownBlocksEditor(root, options = {}) {
         active = !!state.pendingInline.link
           || !!selectionLinkInEditable(editable)
           || (!offsets.collapsed && inlineRangeFullyMarked(runs, offsets.start, offsets.end, 'link'));
+      } else if (offsets && command === 'math') {
+        active = !!selectionMathInEditable(editable)
+          || (!offsets.collapsed && inlineRangeFullyMarked(runs, offsets.start, offsets.end, 'math'));
       } else if (mark === 'code') {
         if (offsets && offsets.collapsed) {
           const marks = inlineMarksAtOffset(runs, offsets.start);
@@ -4104,7 +4645,9 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     });
   };
   linkEditor.append(linkText, linkHref, linkTitle, unlink);
+  mathEditor.append(mathSource, removeMath);
   root.appendChild(linkEditor);
+  root.appendChild(mathEditor);
 
   refreshLinkEditor = (explicitLink = null) => {
     const explicitLinkNode = explicitLink
@@ -4167,6 +4710,8 @@ export function createMarkdownBlocksEditor(root, options = {}) {
   root.addEventListener('focusin', refreshLinkEditor);
   document.addEventListener('pointerdown', handleLinkEditorOutsidePointer, true);
   document.addEventListener('mousedown', handleLinkEditorOutsidePointer, true);
+  document.addEventListener('pointerdown', handleMathEditorOutsidePointer, true);
+  document.addEventListener('mousedown', handleMathEditorOutsidePointer, true);
   window.addEventListener('resize', refreshLinkEditor);
   window.addEventListener('scroll', refreshLinkEditor, true);
   document.addEventListener('selectionchange', () => {
@@ -4266,9 +4811,11 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     ['paragraph', 'paragraph', 'Paragraph', { text: 'New paragraph' }],
     ['heading', 'heading', 'Heading', { level: 2, text: 'Heading' }],
     ['image', 'image', 'Image', { alt: '', src: '' }],
+    ['table', 'table', 'Table', { headers: ['Column 1', 'Column 2'], alignments: ['', ''], rows: [['', '']] }],
     ['list', 'list', 'List', { listType: 'ul', items: defaultListItems() }],
     ['quote', 'quote', 'Quote', { text: 'Quote' }],
     ['code', 'code', 'Code', { lang: '', text: '' }],
+    ['math', 'math', 'Math', { tex: '' }],
     ['source', 'source', 'Markdown', { text: '' }]
   ];
 
@@ -4286,7 +4833,7 @@ export function createMarkdownBlocksEditor(root, options = {}) {
   };
 
   const runBlockCommand = (type, data = {}) => {
-    const focusTypes = new Set(['paragraph', 'heading', 'list', 'quote', 'code', 'source']);
+    const focusTypes = new Set(['paragraph', 'heading', 'table', 'list', 'quote', 'code', 'source']);
     insertCommandBlock(type, data, { focus: focusTypes.has(type) });
   };
 
@@ -4358,7 +4905,8 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     });
     editable.addEventListener('click', (event) => {
       const clickedLink = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-      if (clickedLink) event.preventDefault();
+      const clickedMath = event.target && event.target.closest ? event.target.closest('.press-math[data-tex]') : null;
+      if (clickedLink || clickedMath) event.preventDefault();
       setActive(index, editable, sync);
       const pointerMarks = inlineMarksFromPointerEvent(event, editable);
       state.lastInlineMarks = { editable, marks: pointerMarks };
@@ -4366,6 +4914,7 @@ export function createMarkdownBlocksEditor(root, options = {}) {
       state.lastInlineMarkedRange = pointerCodeRange ? { editable, mark: 'code', ...pointerCodeRange } : null;
       updateInlineToolbarState();
       if (clickedLink) refreshLinkEditor(clickedLink);
+      if (clickedMath) openMathEditorForNode(clickedMath);
     });
     wireInlineEditable(editable, index, sync);
     return editable;
@@ -4399,9 +4948,18 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     }
     if (caption) {
       caption.textContent = block.data.alt || '';
-      caption.hidden = !block.data.alt;
+      caption.classList.toggle('is-empty', !block.data.alt);
     }
     hydrateImages(blockEl);
+  };
+
+  const syncImageAltFromCaption = (block, caption) => {
+    const blockEl = blockElements().find(el => el && el.dataset && el.dataset.blockId === block.id);
+    const img = blockEl && blockEl.querySelector('.blocks-image-preview');
+    const alt = plainEditableValue(caption);
+    if (img) img.alt = alt;
+    if (caption) caption.classList.toggle('is-empty', !alt);
+    updateFromControl(block, { alt });
   };
 
   const setImagePlaceholderVisible = (figure, visible) => {
@@ -4434,15 +4992,12 @@ export function createMarkdownBlocksEditor(root, options = {}) {
   const createImageMetadataControls = (block, index) => {
     const controls = document.createElement('div');
     controls.className = 'blocks-image-meta-controls';
-    const alt = document.createElement('input');
-    alt.type = 'text';
-    alt.className = 'blocks-image-alt';
-    alt.value = block.data.alt || '';
-    alt.placeholder = text('imageAlt', 'Alt text');
-    alt.setAttribute('aria-label', text('imageAlt', 'Alt text'));
     const replace = button(text('replaceImage', 'Replace image'), 'blocks-btn blocks-image-replace');
     replace.title = text('replaceImage', 'Replace image');
     replace.setAttribute('aria-label', text('replaceImage', 'Replace image'));
+    const deleteResource = button(text('deleteImageResource', 'Delete resource'), 'blocks-btn blocks-image-delete-resource');
+    deleteResource.title = text('deleteImageResource', 'Delete resource');
+    deleteResource.setAttribute('aria-label', text('deleteImageResource', 'Delete resource'));
     const title = document.createElement('input');
     title.type = 'text';
     title.className = 'blocks-image-title';
@@ -4450,10 +5005,8 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     title.placeholder = text('imageTitle', 'Image title');
     title.setAttribute('aria-label', text('imageTitle', 'Image title'));
     const update = () => {
-      updateFromControl(block, { alt: inputValue(alt), title: inputValue(title) });
-      syncRenderedImageBlock(block);
+      updateFromControl(block, { title: inputValue(title) });
     };
-    alt.addEventListener('input', update);
     title.addEventListener('input', update);
     replace.addEventListener('mousedown', (event) => event.preventDefault());
     replace.addEventListener('click', () => {
@@ -4462,9 +5015,269 @@ export function createMarkdownBlocksEditor(root, options = {}) {
         options.requestImageUpload({ replaceIndex: index, replaceBlockId: block.id });
       }
     });
-    controls.append(alt, title, replace);
+    deleteResource.disabled = !(typeof options.canDeleteImageResource === 'function' && options.canDeleteImageResource(block.data.src || '', {
+      index,
+      blockId: block.id
+    }));
+    deleteResource.addEventListener('mousedown', (event) => event.preventDefault());
+    deleteResource.addEventListener('click', () => {
+      if (deleteResource.disabled) return;
+      setActive(index);
+      if (typeof options.requestImageDelete === 'function') {
+        options.requestImageDelete({ index, blockId: block.id, src: block.data.src || '' });
+      }
+    });
+    controls.append(title, replace, deleteResource);
     return controls;
   };
+
+  const clampTableColumn = (table, col) => {
+    const count = tableColumnCount(table);
+    if (!count) return 0;
+    const numeric = Number.isFinite(col) ? col : 0;
+    return Math.max(0, Math.min(count - 1, numeric));
+  };
+
+  const normalizeTablePosition = (block, position) => {
+    const table = editableTableData(block.data);
+    const col = clampTableColumn(table, position?.col);
+    const bodyRowCount = table.rows.length;
+    const wantsBody = position?.section === 'body' && bodyRowCount > 0;
+    const row = wantsBody
+      ? Math.max(0, Math.min(bodyRowCount - 1, Number.isFinite(position?.row) ? position.row : 0))
+      : 0;
+    return {
+      section: wantsBody ? 'body' : 'header',
+      row,
+      col
+    };
+  };
+
+  const activeTablePositionForBlock = (block) => normalizeTablePosition(
+    block,
+    state.activeTableCell?.blockId === block.id ? state.activeTableCell : { section: 'header', row: 0, col: 0 }
+  );
+
+  const tablePositionFromCellInput = (input) => {
+    if (!input || !(input.matches && input.matches('.blocks-table-cell-input'))) return null;
+    return {
+      section: input.dataset.tableSection === 'body' ? 'body' : 'header',
+      row: Math.max(0, Number(input.dataset.tableRow) || 0),
+      col: Math.max(0, Number(input.dataset.tableCol) || 0)
+    };
+  };
+
+  const setTableAlignmentSelectValue = (alignment, value) => {
+    if (!alignment) return;
+    const normalized = normalizeTableAlignment(value);
+    alignment.value = normalized;
+    Array.from(alignment.options || []).forEach((option) => {
+      option.selected = option.value === normalized;
+    });
+    if (alignment.value !== normalized) alignment.value = '';
+    alignment.dataset.activeAlignment = normalized;
+  };
+
+  const applyTableAlignmentControlForPosition = (block, position) => {
+    const blockEl = blockElements().find(el => el?.dataset?.blockId === block.id) || null;
+    const alignment = blockEl?.querySelector('.blocks-table-align-select');
+    if (!alignment) return;
+    const table = editableTableData(block.data);
+    const normalized = normalizeTablePosition(block, position);
+    setTableAlignmentSelectValue(alignment, table.alignments[normalized.col]);
+  };
+
+  const isActiveTablePosition = (block, position) => {
+    const active = state.activeTableCell;
+    return !!active
+      && active.blockId === block.id
+      && active.section === position.section
+      && active.row === position.row
+      && active.col === position.col;
+  };
+
+  const syncTableAlignmentControlForPosition = (block, position) => {
+    const normalized = normalizeTablePosition(block, position);
+    const applyIfCurrent = () => {
+      if (!isActiveTablePosition(block, normalized)) return;
+      applyTableAlignmentControlForPosition(block, normalized);
+    };
+    applyTableAlignmentControlForPosition(block, normalized);
+    queueMicrotask(applyIfCurrent);
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(applyIfCurrent);
+    }
+    if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
+      window.setTimeout(applyIfCurrent, 0);
+    }
+  };
+
+  const syncActiveTableAlignmentFromEditable = (activeBlock, editable) => {
+    const cell = (editable && editable.matches && editable.matches('.blocks-table-cell-input'))
+      ? editable
+      : activeBlock?.querySelector('.blocks-table-cell-input:focus');
+    const position = tablePositionFromCellInput(cell);
+    if (!activeBlock || !position) return;
+    const blockId = activeBlock.dataset.blockId || '';
+    const block = state.blocks.find(candidate => candidate && candidate.id === blockId);
+    if (!block || block.type !== 'table') return;
+    const normalized = normalizeTablePosition(block, position);
+    state.activeTableCell = {
+      blockId: block.id,
+      ...normalized
+    };
+    syncTableAlignmentControlForPosition(block, normalized);
+  };
+
+  const setActiveTablePosition = (block, position) => {
+    const normalized = normalizeTablePosition(block, position);
+    state.activeTableCell = {
+      blockId: block.id,
+      ...normalized
+    };
+    syncTableAlignmentControlForPosition(block, normalized);
+    return normalized;
+  };
+
+  const focusTableCell = (block, position) => {
+    const normalized = setActiveTablePosition(block, position);
+    queueMicrotask(() => {
+      const blockEl = blockElements().find(el => el?.dataset?.blockId === block.id) || null;
+      const selector = `.blocks-table-cell-input[data-table-section="${normalized.section}"][data-table-row="${normalized.row}"][data-table-col="${normalized.col}"]`;
+      const target = blockEl?.querySelector(selector);
+      if (target) {
+        target.focus();
+        target.select?.();
+      }
+    });
+  };
+
+  const updateTableBlock = (block, nextData, position) => {
+    block.data = editableTableData(nextData);
+    const normalized = setActiveTablePosition(block, position);
+    updateFromControl(block, block.data, true);
+    focusTableCell(block, normalized);
+  };
+
+  function createTableControls(block, index) {
+    const controls = document.createElement('div');
+    controls.className = 'blocks-table-controls';
+
+    const alignment = document.createElement('select');
+    alignment.className = 'blocks-table-align-select';
+    alignment.title = text('tableAlignment', 'Column alignment');
+    alignment.setAttribute('aria-label', text('tableAlignment', 'Column alignment'));
+    [
+      ['', text('tableAlignDefault', 'Default')],
+      ['left', text('tableAlignLeft', 'Left')],
+      ['center', text('tableAlignCenter', 'Center')],
+      ['right', text('tableAlignRight', 'Right')]
+    ].forEach(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      alignment.appendChild(option);
+    });
+
+    const syncAlignmentSelect = () => {
+      const table = editableTableData(block.data);
+      const position = activeTablePositionForBlock(block);
+      setTableAlignmentSelectValue(alignment, table.alignments[position.col]);
+    };
+
+    alignment.addEventListener('pointerdown', (event) => {
+      event.stopPropagation();
+      setActive(index);
+      syncAlignmentSelect();
+    });
+    alignment.addEventListener('focus', () => {
+      setActive(index);
+      syncAlignmentSelect();
+    });
+    alignment.addEventListener('change', () => {
+      const table = editableTableData(block.data);
+      const position = activeTablePositionForBlock(block);
+      table.alignments[position.col] = normalizeTableAlignment(alignment.value);
+      updateTableBlock(block, table, position);
+    });
+
+    const makeButton = (className, label, handler) => {
+      const buttonEl = button(label, `blocks-icon-btn ${className}`);
+      buttonEl.title = label;
+      buttonEl.setAttribute('aria-label', label);
+      buttonEl.addEventListener('pointerdown', (event) => {
+        event.stopPropagation();
+      });
+      buttonEl.addEventListener('click', (event) => {
+        event.preventDefault();
+        if (buttonEl.disabled) return;
+        setActive(index);
+        handler(buttonEl);
+      });
+      return buttonEl;
+    };
+
+    const addRow = makeButton('blocks-table-add-row', text('tableAddRow', 'Add row'), () => {
+      const table = editableTableData(block.data);
+      const position = activeTablePositionForBlock(block);
+      const blankRow = Array(tableColumnCount(table)).fill('');
+      const insertAt = position.section === 'body' ? position.row + 1 : 0;
+      table.rows.splice(insertAt, 0, blankRow);
+      updateTableBlock(block, table, { section: 'body', row: insertAt, col: position.col });
+    });
+
+    const addColumn = makeButton('blocks-table-add-column', text('tableAddColumn', 'Add column'), () => {
+      const table = editableTableData(block.data);
+      const position = activeTablePositionForBlock(block);
+      const insertAt = position.col + 1;
+      table.headers.splice(insertAt, 0, '');
+      table.alignments.splice(insertAt, 0, '');
+      table.rows = table.rows.map((row) => {
+        const nextRow = row.slice();
+        nextRow.splice(insertAt, 0, '');
+        return nextRow;
+      });
+      updateTableBlock(block, table, { ...position, col: insertAt });
+    });
+
+    const deleteRow = makeButton('blocks-table-delete-row', text('tableDeleteRow', 'Delete row'), () => {
+      const table = editableTableData(block.data);
+      if (table.rows.length <= 1) return;
+      const position = activeTablePositionForBlock(block);
+      const removeAt = position.section === 'body' ? position.row : 0;
+      table.rows.splice(removeAt, 1);
+      const nextRow = Math.max(0, Math.min(table.rows.length - 1, removeAt));
+      updateTableBlock(block, table, { section: 'body', row: nextRow, col: position.col });
+    });
+
+    const deleteColumn = makeButton('blocks-table-delete-column', text('tableDeleteColumn', 'Delete column'), () => {
+      const table = editableTableData(block.data);
+      if (tableColumnCount(table) <= 1) return;
+      const position = activeTablePositionForBlock(block);
+      table.headers.splice(position.col, 1);
+      table.alignments.splice(position.col, 1);
+      table.rows = table.rows.map((row) => {
+        const nextRow = row.slice();
+        nextRow.splice(position.col, 1);
+        return nextRow;
+      });
+      const nextCol = Math.max(0, Math.min(tableColumnCount(table) - 1, position.col));
+      updateTableBlock(block, table, { ...position, col: nextCol });
+    });
+
+    const updateDisabled = () => {
+      const table = editableTableData(block.data);
+      deleteRow.disabled = table.rows.length <= 1;
+      deleteColumn.disabled = tableColumnCount(table) <= 1;
+      syncAlignmentSelect();
+    };
+
+    controls.addEventListener('pointerdown', updateDisabled);
+    controls.addEventListener('focusin', updateDisabled);
+    controls.append(alignment, addRow, addColumn, deleteRow, deleteColumn);
+    updateDisabled();
+    return controls;
+  }
 
   const renderHeadingBlock = (body, block, index) => {
     const level = Math.max(1, Math.min(6, Number(block.data.level) || 2));
@@ -4490,12 +5303,134 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     const resolved = resolveAssetSrc(block.data.src || '');
     configureImagePreview(figure, img, resolved);
     const caption = document.createElement('figcaption');
+    caption.className = 'blocks-image-caption';
+    caption.contentEditable = 'true';
+    caption.spellcheck = true;
+    caption.dataset.placeholder = text('imageAlt', 'Alt text');
+    caption.setAttribute('aria-label', text('imageAlt', 'Alt text'));
     caption.textContent = block.data.alt || '';
-    caption.hidden = !block.data.alt;
+    caption.classList.toggle('is-empty', !block.data.alt);
+    const syncCaption = () => syncImageAltFromCaption(block, caption);
+    editableSyncMap.set(caption, syncCaption);
+    caption.addEventListener('input', syncCaption);
+    caption.addEventListener('paste', (event) => {
+      const pasted = event.clipboardData && event.clipboardData.getData('text/plain');
+      if (pasted == null) return;
+      event.preventDefault();
+      if (insertPlainTextIntoEditable(caption, pasted.replace(/[\r\n]+/g, ' '))) syncCaption();
+    });
+    caption.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.isComposing) {
+        event.preventDefault();
+        return;
+      }
+      if (removeEmptyBlockWithBackspace(event, block, index, caption, syncCaption)) return;
+      handleCrossBlockArrowNavigation(event, index, caption);
+    });
+    caption.addEventListener('focus', () => {
+      setActive(index, caption, syncCaption);
+      updateInlineToolbarState();
+    });
     figure.append(img, placeholder, caption);
 
     body.append(figure);
     hydrateImages(figure);
+  };
+
+  const renderTableBlock = (body, block, index) => {
+    const data = editableTableData(block.data);
+    block.data = data;
+    const wrap = document.createElement('div');
+    wrap.className = 'blocks-table-wrap';
+    const table = document.createElement('table');
+    table.className = 'blocks-table';
+
+    const createCellInput = (section, rowIndex, colIndex, value, isHeader) => {
+      const align = normalizeTableAlignment(data.alignments[colIndex]);
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = [
+        'blocks-table-cell-input',
+        isHeader ? 'blocks-table-header-cell' : 'blocks-table-body-cell',
+        `blocks-table-align-${align || 'default'}`
+      ].join(' ');
+      input.value = String(value || '');
+      input.spellcheck = true;
+      input.dataset.tableSection = section;
+      input.dataset.tableRow = String(rowIndex);
+      input.dataset.tableCol = String(colIndex);
+      input.setAttribute('aria-label', isHeader
+        ? `${text('table', 'Table')} ${text('heading', 'Heading')} ${colIndex + 1}`
+        : `${text('table', 'Table')} ${rowIndex + 1}, ${colIndex + 1}`);
+
+      const sync = () => {
+        const next = editableTableData(block.data);
+        const cleanValue = normalizeTableCellValue(input.value);
+        if (section === 'header') {
+          next.headers[colIndex] = cleanValue;
+        } else if (next.rows[rowIndex]) {
+          next.rows[rowIndex][colIndex] = cleanValue;
+        }
+        setActiveTablePosition(block, { section, row: rowIndex, col: colIndex });
+        updateFromControl(block, next);
+      };
+      editableSyncMap.set(input, sync);
+      input.addEventListener('input', sync);
+      input.addEventListener('paste', (event) => {
+        const pasted = event.clipboardData && event.clipboardData.getData('text/plain');
+        if (pasted == null) return;
+        event.preventDefault();
+        const clean = normalizeTableCellValue(pasted);
+        if (typeof input.setRangeText === 'function') {
+          input.setRangeText(clean, input.selectionStart, input.selectionEnd, 'end');
+        } else {
+          input.value += clean;
+        }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.isComposing) {
+          event.preventDefault();
+          return;
+        }
+        handleCrossBlockArrowNavigation(event, index, input);
+      });
+      input.addEventListener('focus', () => {
+        setActiveTablePosition(block, { section, row: rowIndex, col: colIndex });
+        setActive(index, input, sync);
+      });
+      input.addEventListener('pointerdown', (event) => {
+        if (event && event.button === 0 && event.isPrimary !== false) {
+          setActiveTablePosition(block, { section, row: rowIndex, col: colIndex });
+          activateEditableFromPointer(index, input, sync);
+        }
+      });
+      return input;
+    };
+
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    data.headers.forEach((header, colIndex) => {
+      const th = document.createElement('th');
+      th.appendChild(createCellInput('header', 0, colIndex, header, true));
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+
+    const tbody = document.createElement('tbody');
+    data.rows.forEach((row, rowIndex) => {
+      const tr = document.createElement('tr');
+      data.headers.forEach((_, colIndex) => {
+        const td = document.createElement('td');
+        td.appendChild(createCellInput('body', rowIndex, colIndex, row[colIndex] || '', false));
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+
+    table.append(thead, tbody);
+    wrap.appendChild(table);
+    body.appendChild(wrap);
   };
 
   const createListTypeSelect = (block, index) => {
@@ -4542,6 +5477,7 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     lang.setAttribute('aria-label', text('codeLanguage', 'Language'));
     const currentLang = String(block.data.lang || '').trim();
     const normalizedLang = currentLang.toLowerCase();
+    const resolvedLang = CODE_LANGUAGE_ALIASES.get(normalizedLang) || normalizedLang;
     const labels = new Map([
       ['', 'Auto / blank'],
       ['plain', 'plain']
@@ -4557,12 +5493,27 @@ export function createMarkdownBlocksEditor(root, options = {}) {
       lang.appendChild(option);
     };
     CODE_LANGUAGE_OPTIONS.forEach((value) => appendOption(value, labels.get(value) || value));
-    if (currentLang && !CODE_LANGUAGE_OPTIONS.includes(normalizedLang)) {
+    if (currentLang && !CODE_LANGUAGE_OPTIONS.includes(normalizedLang) && !CODE_LANGUAGE_OPTIONS.includes(resolvedLang)) {
       appendOption(currentLang, `Unsupported: ${currentLang}`, true);
     }
-    lang.value = CODE_LANGUAGE_OPTIONS.includes(normalizedLang) ? normalizedLang : currentLang;
+    lang.value = CODE_LANGUAGE_OPTIONS.includes(normalizedLang)
+      ? normalizedLang
+      : (CODE_LANGUAGE_OPTIONS.includes(resolvedLang) ? resolvedLang : currentLang);
     lang.addEventListener('change', () => updateFromControl(block, { lang: lang.value }, true));
     return lang;
+  };
+
+  const createMathEditButton = (block, index) => {
+    const edit = button(text('editMath', 'Edit math'), 'blocks-btn blocks-math-edit');
+    edit.title = text('editMath', 'Edit math');
+    edit.setAttribute('aria-label', text('editMath', 'Edit math'));
+    edit.addEventListener('mousedown', (event) => event.preventDefault());
+    edit.addEventListener('click', () => {
+      setActive(index);
+      const blockEl = blockElements()[index] || null;
+      openMathEditorForBlock(block, blockEl);
+    });
+    return edit;
   };
 
   const autoSizeTextarea = (area) => {
@@ -4592,7 +5543,7 @@ export function createMarkdownBlocksEditor(root, options = {}) {
 
   const codeLabelText = (key, fallback) => {
     try {
-      return (window.__ns_t && typeof window.__ns_t === 'function') ? window.__ns_t(key) : fallback;
+      return (window.__press_t && typeof window.__press_t === 'function') ? window.__press_t(key) : fallback;
     } catch (_) {
       return fallback;
     }
@@ -4864,7 +5815,8 @@ export function createMarkdownBlocksEditor(root, options = {}) {
       });
       span.addEventListener('click', (event) => {
         const clickedLink = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-        if (clickedLink) event.preventDefault();
+        const clickedMath = event.target && event.target.closest ? event.target.closest('.press-math[data-tex]') : null;
+        if (clickedLink || clickedMath) event.preventDefault();
         setActive(index, span, sync);
         const pointerMarks = inlineMarksFromPointerEvent(event, span);
         state.lastInlineMarks = { editable: span, marks: pointerMarks };
@@ -4872,6 +5824,7 @@ export function createMarkdownBlocksEditor(root, options = {}) {
         state.lastInlineMarkedRange = pointerCodeRange ? { editable: span, mark: 'code', ...pointerCodeRange } : null;
         updateInlineToolbarState();
         if (clickedLink) refreshLinkEditor(clickedLink);
+        if (clickedMath) openMathEditorForNode(clickedMath);
       });
       wireInlineEditable(span, index, sync);
       li.appendChild(span);
@@ -4942,6 +5895,31 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     pre.appendChild(scroll);
     pre.appendChild(languageLabel);
     body.appendChild(pre);
+  };
+
+  const renderMathBlock = (body, block, index) => {
+    const preview = document.createElement('div');
+    preview.className = 'blocks-math-preview';
+    const math = document.createElement('div');
+    math.className = 'press-math press-math-display blocks-display-math';
+    math.dataset.tex = block.data.tex || '';
+    math.setAttribute('data-tex', block.data.tex || '');
+    math.textContent = block.data.tex || text('math', 'Math');
+    preview.appendChild(math);
+    preview.addEventListener('pointerdown', (event) => {
+      if (!event || event.button !== 0 || event.isPrimary === false) return;
+      event.preventDefault();
+      event.stopPropagation();
+      activateNonTextBlockFromPointer(index, closestElement(preview, '.blocks-block-math'));
+    });
+    preview.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setActive(index);
+      openMathEditorForBlock(block, closestElement(preview, '.blocks-block-math'));
+    });
+    body.appendChild(preview);
+    try { renderPressMath(preview); } catch (_) {}
   };
 
   const renderCardBlock = (body, block, index) => {
@@ -5041,10 +6019,14 @@ export function createMarkdownBlocksEditor(root, options = {}) {
       body.appendChild(quote);
     } else if (block.type === 'image') {
       renderImageBlock(body, block, index);
+    } else if (block.type === 'table') {
+      renderTableBlock(body, block, index);
     } else if (block.type === 'list') {
       renderListBlock(body, block, index);
     } else if (block.type === 'code') {
       renderCodeBlock(body, block, index);
+    } else if (block.type === 'math') {
+      renderMathBlock(body, block, index);
     } else if (block.type === 'card') {
       renderCardBlock(body, block, index);
     } else {
@@ -5153,8 +6135,14 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     if (block.type === 'code') {
       head.appendChild(createCodeLanguageInput(block));
     }
+    if (block.type === 'math') {
+      head.appendChild(createMathEditButton(block, index));
+    }
     if (block.type === 'image') {
       head.appendChild(createImageMetadataControls(block, index));
+    }
+    if (block.type === 'table') {
+      head.appendChild(createTableControls(block, index));
     }
     if (block.type === 'paragraph' || block.type === 'quote' || block.type === 'list') {
       head.appendChild(createInlineControls(index));
@@ -5204,6 +6192,27 @@ export function createMarkdownBlocksEditor(root, options = {}) {
     requestStickyBlockHeadUpdate();
   }
 
+  const resolveImageBlockTarget = (target = state.activeIndex) => {
+    const targetIndex = target && typeof target === 'object' ? target.index : target;
+    const expectedBlockId = target && typeof target === 'object' && typeof target.blockId === 'string'
+      ? target.blockId
+      : '';
+    let safeIndex = Number.isInteger(targetIndex) ? targetIndex : state.activeIndex;
+    if (!Number.isInteger(safeIndex) || safeIndex < 0 || safeIndex >= state.blocks.length) {
+      if (!expectedBlockId) return null;
+      safeIndex = state.blocks.findIndex(item => item && item.id === expectedBlockId);
+      if (safeIndex < 0) return null;
+    }
+    let block = state.blocks[safeIndex];
+    if (expectedBlockId && (!block || block.id !== expectedBlockId)) {
+      safeIndex = state.blocks.findIndex(item => item && item.id === expectedBlockId);
+      if (safeIndex < 0) return null;
+      block = state.blocks[safeIndex];
+    }
+    if (!block || block.type !== 'image') return null;
+    return { block, index: safeIndex };
+  };
+
   const api = {
     setMarkdown(markdown) {
       state.blocks = parseMarkdownBlocks(markdown);
@@ -5214,6 +6223,10 @@ export function createMarkdownBlocksEditor(root, options = {}) {
       state.activeLink = null;
       state.linkEditMode = '';
       state.linkSelection = null;
+      state.activeMath = null;
+      state.activeMathBlockId = '';
+      state.mathEditMode = '';
+      state.mathSelection = null;
       state.pendingInline = {};
       state.lastInlineMarkedRange = null;
       state.cardPickerOpen = false;
@@ -5230,34 +6243,30 @@ export function createMarkdownBlocksEditor(root, options = {}) {
       return { index: state.blocks.indexOf(block) };
     },
     replaceImageBlock(src, target = state.activeIndex) {
-      const targetIndex = target && typeof target === 'object' ? target.index : target;
-      const expectedBlockId = target && typeof target === 'object' && typeof target.blockId === 'string'
-        ? target.blockId
-        : '';
-      let safeIndex = Number.isInteger(targetIndex) ? targetIndex : state.activeIndex;
-      if (!Number.isInteger(safeIndex) || safeIndex < 0 || safeIndex >= state.blocks.length) {
-        if (!expectedBlockId) return null;
-        safeIndex = state.blocks.findIndex(item => item && item.id === expectedBlockId);
-        if (safeIndex < 0) return null;
-      }
-      let block = state.blocks[safeIndex];
-      if (expectedBlockId && (!block || block.id !== expectedBlockId)) {
-        safeIndex = state.blocks.findIndex(item => item && item.id === expectedBlockId);
-        if (safeIndex < 0) return null;
-        block = state.blocks[safeIndex];
-      }
-      if (!block || block.type !== 'image') return null;
-      updateFromControl(block, { src });
-      syncRenderedImageBlock(block);
+      const resolved = resolveImageBlockTarget(target);
+      if (!resolved) return null;
+      const { block, index: safeIndex } = resolved;
+      updateFromControl(block, { src }, true);
       setActive(safeIndex);
       return { index: safeIndex };
+    },
+    getImageBlockSource(target = state.activeIndex) {
+      const resolved = resolveImageBlockTarget(target);
+      return resolved ? String((resolved.block.data && resolved.block.data.src) || '') : '';
+    },
+    deleteImageBlock(target = state.activeIndex) {
+      const resolved = resolveImageBlockTarget(target);
+      if (!resolved) return null;
+      const src = String((resolved.block.data && resolved.block.data.src) || '');
+      deleteBlockAt(resolved.index);
+      return { index: resolved.index, src };
     },
     setCardEntries(entries) {
       state.cardEntries = Array.isArray(entries) ? entries.slice() : [];
       if (state.cardPickerOpen) renderCardPicker();
     },
     focus() {
-      const active = list.querySelector('.blocks-block.is-active [contenteditable="true"], .blocks-block.is-active input, .blocks-block.is-active textarea');
+      const active = list.querySelector('.blocks-block.is-active [contenteditable="true"], .blocks-block.is-active .blocks-image-caption, .blocks-block.is-active input, .blocks-block.is-active textarea');
       try { if (active) active.focus(); } catch (_) {}
     },
     requestLayout() {

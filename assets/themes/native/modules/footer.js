@@ -25,7 +25,7 @@ export function mount(context = {}) {
   if (!left.querySelector('.footer-copy')) {
     const copy = doc.createElement('span');
     copy.className = 'footer-copy';
-    copy.innerHTML = '© <span id="footerYear"></span> <span class="footer-site">NanoSite</span>';
+    copy.innerHTML = '© <span id="footerYear"></span> <span class="footer-site">Press</span>';
     left.appendChild(copy);
   }
 
@@ -61,7 +61,13 @@ export function mount(context = {}) {
     right.appendChild(top);
   }
 
-  const updatedRegions = { ...regions, footer, footerNav: nav };
-  context.regions = updatedRegions;
-  return { regions: updatedRegions };
+  if (typeof regions.register === 'function') {
+    regions.register('footer', footer);
+    regions.register('footerNav', nav);
+  } else {
+    regions.footer = footer;
+    regions.footerNav = nav;
+  }
+  context.regions = regions;
+  return { regions };
 }

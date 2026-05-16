@@ -1,25 +1,96 @@
-import { escapeHtml, escapeMarkdown, sanitizeUrl, resolveImageSrc } from './utils.js';
+import { resolveImageSrc, sanitizeUrl } from './safe-html.js';
+import { escapeHtml, escapeMarkdown } from './utils.js';
 import { stripFrontMatter } from './content.js';
 
+const DEFAULT_PARSE_LIMITS = {
+  maxDepth: 8,
+  maxInputLength: 512 * 1024,
+  maxLines: 12000
+};
+
+function positiveInt(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.floor(n);
+}
+
+function nonNegativeInt(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}
+
+function normalizeParseOptions(options = {}) {
+  const input = options && typeof options === 'object' ? options : {};
+  const limits = input.limits && typeof input.limits === 'object' ? input.limits : {};
+  return {
+    depth: Math.max(0, Math.floor(Number(input.depth) || 0)),
+    maxDepth: nonNegativeInt(input.maxDepth ?? limits.maxDepth, DEFAULT_PARSE_LIMITS.maxDepth),
+    maxInputLength: positiveInt(input.maxInputLength ?? limits.maxInputLength, DEFAULT_PARSE_LIMITS.maxInputLength),
+    maxLines: positiveInt(input.maxLines ?? limits.maxLines, DEFAULT_PARSE_LIMITS.maxLines)
+  };
+}
+
+function renderMarkdownAsText(markdown) {
+  const text = escapeHtml(String(markdown || ''));
+  return text ? `<p>${text}</p>` : '';
+}
+
+function parseNestedMarkdown(markdown, baseDir, options) {
+  return mdParse(markdown, baseDir, { ...options, depth: options.depth + 1 });
+}
+
+function normalizeCodeFenceLanguage(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_.+-]{0,39}$/u.test(raw) ? raw : '';
+}
+
 function isPipeTableSeparator(line) {
+  return !!parsePipeTableAlignments(line);
+}
+
+function parsePipeTableAlignments(line) {
   // Matches a classic Markdown table separator like:
-  // | ----- | :----: | ------- |
+  // | ----- | :----: | ----: |
+  // and returns the per-column alignment requested by the colon markers.
   const s = String(line || '').trim();
   if (!s.startsWith('|')) return false;
   const cells = s.split('|').slice(1, -1); // drop leading/trailing pipes
-  if (cells.length === 0) return false;
+  if (cells.length === 0) return null;
+  const alignments = [];
   for (const c of cells) {
-    if (!/^\s*:?-{3,}:?\s*$/.test(c)) return false;
+    const match = String(c || '').trim().match(/^(:)?-{3,}(:)?$/);
+    if (!match) return null;
+    const left = !!match[1];
+    const right = !!match[2];
+    alignments.push(left && right ? 'center' : (right ? 'right' : (left ? 'left' : '')));
   }
-  return true;
+  return alignments;
+}
+
+function tableCellAlignAttr(alignments, cellIndex) {
+  const align = Array.isArray(alignments) ? alignments[cellIndex] : '';
+  return align ? ` class="press-table-align-${align}" style="text-align: ${align}"` : '';
 }
 
 function replaceInline(text, baseDir) {
   const parts = String(text || '').split('`');
+  const mathTokens = [];
+  const stashMath = (segment) => String(segment || '').replace(/&#040;([\s\S]+?)&#041;/g, (m, tex) => {
+    const source = String(tex || '').trim();
+    if (!source) return m;
+    const token = `\u0000PRESS_MATH_${mathTokens.length}\u0000`;
+    mathTokens.push(`<span class="press-math press-math-inline" data-tex="${source}"></span>`);
+    return token;
+  });
+  const restoreMath = (segment) => String(segment || '').replace(/\u0000PRESS_MATH_(\d+)\u0000/g, (m, index) => {
+    const html = mathTokens[Number(index)];
+    return html || m;
+  });
   let result = '';
   for (let i = 0; i < parts.length; i++) {
     if (i % 2 === 0) {
-      result += parts[i]
+      result += restoreMath(stashMath(parts[i])
         .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
         .replace(/\*(.*?)\*/g, '<em>$1</em>')
         // Obsidian-style embeds: ![[path|optional alt or options]]
@@ -109,7 +180,7 @@ function replaceInline(text, baseDir) {
         })
         .replace(/~~(.*?)~~/g, '<del>$1</del>')
         .replace(/^\*\*\*$/gm, '<hr>')
-        .replace(/^---$/gm, '<hr>');
+        .replace(/^---$/gm, '<hr>'));
     } else { result += parts[i]; }
     if (i < parts.length - 1) { result += '`'; }
   }
@@ -169,12 +240,23 @@ function isFenceCloseLine(line, fence) {
   return re.test(text);
 }
 
-export function mdParse(markdown, baseDir) {
+export function mdParse(markdown, baseDir, options = {}) {
+  const parseOptions = normalizeParseOptions(options);
+  if (parseOptions.depth > parseOptions.maxDepth) {
+    return { post: renderMarkdownAsText(markdown), toc: '' };
+  }
+
   // Strip front matter before parsing
-  const cleanedMarkdown = stripFrontMatter(markdown);
-  const lines = String(cleanedMarkdown || '').split('\n');
+  const rawMarkdown = String(markdown || '');
+  const boundedMarkdown = rawMarkdown.length > parseOptions.maxInputLength
+    ? rawMarkdown.slice(0, parseOptions.maxInputLength)
+    : rawMarkdown;
+  const cleanedMarkdown = stripFrontMatter(boundedMarkdown);
+  let lines = String(cleanedMarkdown || '').split('\n');
+  if (lines.length > parseOptions.maxLines) lines = lines.slice(0, parseOptions.maxLines);
   let html = '', tochtml = [], tochirc = [];
   let activeCodeFence = null, isInTable = false, isInTodo = false, isInPara = false;
+  let tableAlignments = null;
   let codeLang = '';
   let codeBlockIndent = ''; // Store the indent level of the opening code block
   const closePara = () => { if (isInPara) { html += '</p>'; isInPara = false; } };
@@ -218,7 +300,7 @@ export function mdParse(markdown, baseDir) {
       closePara();
       activeCodeFence = fence;
       codeBlockIndent = lineIndent; // Remember the indent level
-      codeLang = (fence.info.trim().split(/\s+/)[0] || '').toLowerCase();
+      codeLang = normalizeCodeFenceLanguage(fence.info.trim().split(/\s+/)[0] || '');
       // Calculate indent level (tab = 4 spaces, each level = 2rem roughly)
       const indentLevel = Math.floor(lineIndent.replace(/\t/g, '    ').length / 4);
       const indentClass = indentLevel > 0 ? ` code-indent-${indentLevel}` : '';
@@ -227,6 +309,25 @@ export function mdParse(markdown, baseDir) {
     }
 
     const rawLine = escapeMarkdown(line);
+
+    // Display math blocks. Only a line containing $$ opens/closes a block.
+    // Unclosed blocks fall back to ordinary Markdown text below.
+    if (String(line || '').trim() === '$$') {
+      let j = i + 1;
+      const mathLines = [];
+      for (; j < lines.length; j++) {
+        if (String(lines[j] || '').trim() === '$$') break;
+        mathLines.push(lines[j]);
+      }
+      if (j < lines.length) {
+        closeAllLists();
+        closePara();
+        const tex = escapeHtml(mathLines.join('\n'));
+        html += `<div class="press-math press-math-display" data-tex="${tex}"></div>`;
+        i = j;
+        continue;
+      }
+    }
 
     // If currently inside a list but the next line starts a fenced code/table/blockquote/header,
     // we'll close lists right before handling those blocks (see below after matches).
@@ -266,15 +367,15 @@ export function mdParse(markdown, baseDir) {
           })[t] || '📝';
           const role = (type === 'warning' || type === 'caution' || type === 'danger' || type === 'error') ? 'alert' : 'note';
           const body = qLines.slice(1).join('\n');
-          const bodyHtml = mdParse(body, baseDir).post;
+          const bodyHtml = parseNestedMarkdown(body, baseDir, parseOptions).post;
           const titleHtml = replaceInline(escapeHtml(label), baseDir);
           html += `<div class="callout callout-${type}" data-callout="${type}" role="${role}"><div class="callout-title"><span class="callout-icon" aria-hidden="true">${escapeHtml(iconFor(type))}</span><span class="callout-label">${titleHtml}</span></div><div class="callout-body">${bodyHtml}</div></div>`;
         } else {
-          html += `<blockquote>${mdParse(quote, baseDir).post}</blockquote>`;
+          html += `<blockquote>${parseNestedMarkdown(quote, baseDir, parseOptions).post}</blockquote>`;
         }
       } catch (_) {
         // Fallback to plain blockquote rendering on any parsing error
-        try { html += `<blockquote>${mdParse(quote, baseDir).post}</blockquote>`; } catch (_) { html += `<blockquote>${escapeHtml(quote)}</blockquote>`; }
+        try { html += `<blockquote>${parseNestedMarkdown(quote, baseDir, parseOptions).post}</blockquote>`; } catch (_) { html += `<blockquote>${escapeHtml(quote)}</blockquote>`; }
       }
       i = j - 1;
       continue;
@@ -286,10 +387,12 @@ export function mdParse(markdown, baseDir) {
       const tabs = rawLine.split('|');
       if (!isInTable) {
         // Start a table only if the next line is a header separator row
-        if (i + 1 < lines.length && isPipeTableSeparator(lines[i + 1])) {
+        const nextAlignments = i + 1 < lines.length ? parsePipeTableAlignments(lines[i + 1]) : null;
+        if (nextAlignments) {
           isInTable = true;
+          tableAlignments = nextAlignments;
           html += '<div class="table-wrap"><table><thead><tr>';
-          for (let j = 1; j < tabs.length - 1; j++) html += `<th>${mdParse(tabs[j].trim(), baseDir).post}</th>`;
+          for (let j = 1; j < tabs.length - 1; j++) html += `<th${tableCellAlignAttr(tableAlignments, j - 1)}>${parseNestedMarkdown(tabs[j].trim(), baseDir, parseOptions).post}</th>`;
           html += '</tr></thead><tbody>';
           // Skip the separator line
           i += 1;
@@ -303,18 +406,20 @@ export function mdParse(markdown, baseDir) {
         // Inside a table body: ignore any stray separator lines
         if (isPipeTableSeparator(line)) { continue; }
         html += '<tr>';
-        for (let j = 1; j < tabs.length - 1; j++) html += `<td>${mdParse(tabs[j].trim(), baseDir).post}</td>`;
+        for (let j = 1; j < tabs.length - 1; j++) html += `<td${tableCellAlignAttr(tableAlignments, j - 1)}>${parseNestedMarkdown(tabs[j].trim(), baseDir, parseOptions).post}</td>`;
         html += '</tr>';
       }
       // Close table if the next line is not a pipe row
       if (isInTable && (i + 1 >= lines.length || !lines[i + 1].startsWith('|'))) {
         html += '</tbody></table></div>';
         isInTable = false;
+        tableAlignments = null;
       }
       continue;
     } else if (isInTable) {
       html += '</tbody></table></div>';
       isInTable = false;
+      tableAlignments = null;
     }
 
     // To-do list

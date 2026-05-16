@@ -1,7 +1,11 @@
+import { setSafeHtml } from './safe-html.js';
 import { escapeHtml } from './utils.js';
+export { renderPressPostCardHtml } from './post-card-html.js';
 
 const safe = (value) => escapeHtml(String(value ?? '')) || '';
 const asBool = (value) => value === true || value === 'true' || value === '';
+const isDomElement = (value) => value && typeof value === 'object' && value.nodeType === 1;
+let pressSearchId = 0;
 
 function defineElement(name, ctor) {
   try {
@@ -11,7 +15,7 @@ function defineElement(name, ctor) {
   } catch (_) {}
 }
 
-function dispatchNanoEvent(element, name, detail = {}) {
+function dispatchPressEvent(element, name, detail = {}) {
   try {
     element.dispatchEvent(new CustomEvent(name, {
       detail,
@@ -21,14 +25,51 @@ function dispatchNanoEvent(element, name, detail = {}) {
   } catch (_) {}
 }
 
-export class NanoSearch extends HTMLElement {
+function wantsShadowRoot(element) {
+  if (!element || typeof element.getAttribute !== 'function') return false;
+  return element.hasAttribute('use-shadow') || element.getAttribute('render-root') === 'shadow';
+}
+
+function ensureShadowRoot(element) {
+  if (!wantsShadowRoot(element) || element.shadowRoot || typeof element.attachShadow !== 'function') {
+    return element && element.shadowRoot ? element.shadowRoot : null;
+  }
+  try {
+    return element.attachShadow({ mode: 'open' });
+  } catch (_) {
+    return null;
+  }
+}
+
+function getRenderRoot(element) {
+  return (element && (element.shadowRoot || ensureShadowRoot(element))) || element;
+}
+
+function hasAssignedSlot(element, name) {
+  try {
+    return !!(element && element.querySelector(`[slot="${name}"]`));
+  } catch (_) {
+    return false;
+  }
+}
+
+function slottedNodeHtml(node) {
+  if (!node) return '';
+  const outerHtml = typeof node.outerHTML === 'string' ? node.outerHTML : '';
+  if (outerHtml) return outerHtml;
+  // Text-only fallbacks are text content, not explicit theme markup.
+  return safe(node.textContent || '');
+}
+
+export class PressSearch extends HTMLElement {
   static get observedAttributes() {
-    return ['placeholder', 'value', 'variant', 'label'];
+    return ['placeholder', 'value', 'label', 'field-class', 'icon-class', 'icon', 'use-shadow', 'render-root'];
   }
 
   constructor() {
     super();
     this._input = null;
+    this._inputId = `press-search-input-${++pressSearchId}`;
     this._inputHandler = (event) => this._handleKeydown(event);
     this._toggleCleanup = null;
   }
@@ -44,7 +85,7 @@ export class NanoSearch extends HTMLElement {
 
   attributeChangedCallback(name, oldValue, newValue) {
     if (!this.isConnected) return;
-    if (name === 'variant' && oldValue !== newValue) {
+    if (['field-class', 'icon-class', 'icon', 'use-shadow', 'render-root'].includes(name) && oldValue !== newValue) {
       this.render();
       return;
     }
@@ -65,7 +106,8 @@ export class NanoSearch extends HTMLElement {
   }
 
   get input() {
-    return this.querySelector('input[type="search"]');
+    const root = getRenderRoot(this);
+    return root && typeof root.querySelector === 'function' ? root.querySelector('input[type="search"]') : null;
   }
 
   get value() {
@@ -83,7 +125,13 @@ export class NanoSearch extends HTMLElement {
   render() {
     const previous = this.input ? this.input.value : (this.getAttribute('value') || '');
     this._unbindInput();
-    this.innerHTML = this._markup();
+    const root = getRenderRoot(this);
+    if (root && root !== this) {
+      this.textContent = '';
+      root.innerHTML = this._markup();
+    } else {
+      this.innerHTML = this._markup();
+    }
     this._input = this.input;
     this._syncInputState(previous);
     this._bindInput();
@@ -160,17 +208,15 @@ export class NanoSearch extends HTMLElement {
   }
 
   _markup() {
-    const variant = (this.getAttribute('variant') || 'native').toLowerCase();
     const placeholder = safe(this.getAttribute('placeholder') || '');
     const label = safe(this.getAttribute('label') || 'Search');
-    const input = `<input id="searchInput" type="search" autocomplete="off" spellcheck="false" aria-label="${label}" placeholder="${placeholder}" />`;
-    if (variant === 'arcus') {
-      return `<label class="arcus-search" for="searchInput"><span class="arcus-search__icon" aria-hidden="true">&#128269;</span>${input}</label>`;
-    }
-    if (variant === 'solstice') {
-      return `<label class="solstice-search" for="searchInput"><span class="solstice-search__icon" aria-hidden="true">&#128269;</span>${input}</label>`;
-    }
-    return input;
+    const fieldClass = safe(this.getAttribute('field-class') || 'press-search__field');
+    const iconClass = safe(this.getAttribute('icon-class') || 'press-search__icon');
+    const icon = this.hasAttribute('icon') ? safe(this.getAttribute('icon') || '') : '';
+    const iconHtml = icon ? `<span class="${iconClass}" part="icon" aria-hidden="true">${icon}</span>` : '';
+    const inputId = safe(this._inputId || `press-search-input-${++pressSearchId}`);
+    const input = `<input id="${inputId}" part="input" type="search" autocomplete="off" spellcheck="false" aria-label="${label}" placeholder="${placeholder}" />`;
+    return `<label class="${fieldClass}" part="label" for="${inputId}">${iconHtml}${input}</label>`;
   }
 
   _syncInputState(valueOverride) {
@@ -208,11 +254,11 @@ export class NanoSearch extends HTMLElement {
     if (!event || event.key !== 'Enter') return;
     const input = event.target && event.target.closest ? event.target.closest('input[type="search"]') : this.input;
     const query = input ? String(input.value || '').trim() : '';
-    dispatchNanoEvent(this, 'nano:search', { query });
+    dispatchPressEvent(this, 'press:search', { query });
   }
 }
 
-export class NanoThemeControls extends HTMLElement {
+export class PressThemeControls extends HTMLElement {
   constructor() {
     super();
     this._labels = {};
@@ -275,19 +321,25 @@ export class NanoThemeControls extends HTMLElement {
   }
 
   _variant() {
-    return (this.getAttribute('variant') || 'native').toLowerCase();
+    const raw = String(this.getAttribute('variant') || 'native').toLowerCase().trim();
+    return raw.replace(/[^a-z0-9_-]/g, '') || 'native';
   }
 
   _syncHostClass() {
     const variant = this._variant();
     if (!this.id) this.id = 'tools';
+    Array.from(this.classList || []).forEach((className) => {
+      if (String(className || '').startsWith('press-theme-controls--')) {
+        this.classList.remove(className);
+      }
+    });
     this.classList.remove('box', 'arcus-tools__groups', 'solstice-tools');
     if (variant === 'arcus') {
-      this.classList.add('arcus-tools__groups');
+      this.classList.add('arcus-tools__groups', `press-theme-controls--${variant}`);
     } else if (variant === 'solstice') {
-      this.classList.add('solstice-tools');
+      this.classList.add('solstice-tools', `press-theme-controls--${variant}`);
     } else {
-      this.classList.add('box');
+      this.classList.add('box', `press-theme-controls--${variant}`);
     }
   }
 
@@ -392,9 +444,9 @@ export class NanoThemeControls extends HTMLElement {
     const control = event.target && event.target.closest ? event.target.closest('[data-role]') : null;
     if (!control || !this.contains(control)) return;
     const role = control.getAttribute('data-role');
-    if (role === 'theme-toggle') dispatchNanoEvent(this, 'nano:theme-toggle');
-    else if (role === 'post-editor') dispatchNanoEvent(this, 'nano:open-editor');
-    else if (role === 'language-reset') dispatchNanoEvent(this, 'nano:language-reset');
+    if (role === 'theme-toggle') dispatchPressEvent(this, 'press:theme-toggle');
+    else if (role === 'post-editor') dispatchPressEvent(this, 'press:open-editor');
+    else if (role === 'language-reset') dispatchPressEvent(this, 'press:language-reset');
   }
 
   _handleChange(event) {
@@ -402,9 +454,9 @@ export class NanoThemeControls extends HTMLElement {
     if (!control || !this.contains(control)) return;
     const role = control.getAttribute('data-role');
     if (role === 'theme-pack') {
-      dispatchNanoEvent(this, 'nano:theme-pack-change', { value: control.value || '' });
+      dispatchPressEvent(this, 'press:theme-pack-change', { value: control.value || '' });
     } else if (role === 'language') {
-      dispatchNanoEvent(this, 'nano:language-change', { value: control.value || '' });
+      dispatchPressEvent(this, 'press:language-change', { value: control.value || '' });
     }
   }
 
@@ -439,26 +491,37 @@ export class NanoThemeControls extends HTMLElement {
     if (!select) return;
     select.textContent = '';
     const current = this._currentLang || (this._languages[0] && this._languages[0].value) || '';
+    const seen = new Set();
     this._languages.forEach((lang) => {
       if (!lang) return;
       const value = String(lang.value || lang.code || '').trim();
-      if (!value) return;
+      if (!value || seen.has(value)) return;
       const option = (this.ownerDocument || document).createElement('option');
       option.value = value;
       option.textContent = String(lang.label || value);
       select.appendChild(option);
+      seen.add(value);
     });
+    if (current && !seen.has(current)) {
+      const option = (this.ownerDocument || document).createElement('option');
+      option.value = current;
+      option.textContent = current;
+      select.appendChild(option);
+    }
     if (current) select.value = current;
   }
 }
 
-export class NanoToc extends HTMLElement {
+export class PressToc extends HTMLElement {
   constructor() {
     super();
     this._tocHtml = '';
+    this._baseDir = '';
     this._articleTitle = '';
     this._headings = [];
     this._positions = [];
+    this._contentRootElement = null;
+    this._scrollRootElement = null;
     this._ticking = false;
     this._onScroll = () => this._scheduleActiveUpdate();
     this._onResize = () => {
@@ -479,8 +542,10 @@ export class NanoToc extends HTMLElement {
   renderToc(options = {}) {
     this._cleanupListeners();
     this._tocHtml = String(options.tocHtml || '');
+    this._baseDir = String(options.baseDir || '');
     this._articleTitle = String(options.articleTitle || '');
-    if (options.variant) this.setAttribute('variant', String(options.variant));
+    this._contentRootElement = isDomElement(options.contentRoot) ? options.contentRoot : null;
+    this._scrollRootElement = isDomElement(options.scrollRoot) ? options.scrollRoot : null;
     if (options.topLabel != null) this.setAttribute('top-label', String(options.topLabel));
     if (options.topAria != null) this.setAttribute('top-aria', String(options.topAria));
     if (options.contentSelector != null) this.setAttribute('content-selector', String(options.contentSelector));
@@ -489,6 +554,10 @@ export class NanoToc extends HTMLElement {
       return false;
     }
     this.innerHTML = this._markup();
+    const tocBody = this.querySelector('[data-press-toc-body]');
+    if (tocBody) {
+      setSafeHtml(tocBody, this._tocHtml, this._baseDir, { alreadySanitized: true });
+    }
     this.enhance();
     return true;
   }
@@ -496,6 +565,9 @@ export class NanoToc extends HTMLElement {
   clear() {
     this._cleanupListeners();
     this._tocHtml = '';
+    this._baseDir = '';
+    this._contentRootElement = null;
+    this._scrollRootElement = null;
     this.innerHTML = '';
   }
 
@@ -512,25 +584,19 @@ export class NanoToc extends HTMLElement {
     return true;
   }
 
-  _variant() {
-    return (this.getAttribute('variant') || 'native').toLowerCase();
-  }
-
   _markup() {
-    const variant = this._variant();
     const title = safe(this._articleTitle || this.getAttribute('toc-title') || '');
-    if (variant === 'arcus') {
+    const innerClass = safe(this.getAttribute('inner-class') || '');
+    const titleClass = safe(this.getAttribute('title-class') || '');
+    const showTop = this.getAttribute('show-top') !== 'false';
+    if (innerClass || titleClass || !showTop) {
       const heading = title || safe(this.getAttribute('fallback-title') || 'Table of contents');
-      return `<div class="arcus-toc__inner"><div class="arcus-toc__title">${heading}</div>${this._tocHtml}</div>`;
-    }
-    if (variant === 'solstice') {
-      const heading = title || safe(this.getAttribute('fallback-title') || 'Table of contents');
-      return `<div class="solstice-toc__inner"><div class="solstice-toc__title">${heading}</div>${this._tocHtml}</div>`;
+      return `<div class="${innerClass || 'press-toc__inner'}" part="toc"><div class="${titleClass || 'press-toc__title'}" part="title">${heading}</div><div data-press-toc-body></div></div>`;
     }
     const topLabel = safe(this.getAttribute('top-label') || 'Top');
     const topAria = safe(this.getAttribute('top-aria') || 'Back to top');
     const titleHtml = title ? `<span>${title}</span>` : '';
-    return `<div class="toc-header">${titleHtml}<button type="button" class="toc-top" aria-label="${topAria}">${topLabel}</button></div>${this._tocHtml}`;
+    return `<div class="toc-header" part="header">${titleHtml}<button type="button" class="toc-top" part="top-button" aria-label="${topAria}">${topLabel}</button></div><div part="toc" data-press-toc-body></div>`;
   }
 
   _enhanceRows() {
@@ -573,13 +639,13 @@ export class NanoToc extends HTMLElement {
       const href = anchor.getAttribute('href') || '';
       const id = href.replace(/^#/, '');
       if (id && !anchor.classList.contains('toc-top')) this._idToLink.set(id, anchor);
-      if (anchor.dataset.nanoTocBound === 'true') return;
-      anchor.dataset.nanoTocBound = 'true';
+      if (anchor.dataset.pressTocBound === 'true') return;
+      anchor.dataset.pressTocBound = 'true';
       anchor.addEventListener('click', (event) => this._handleTocLink(event, anchor));
     });
     const top = this.querySelector('.toc-top');
-    if (top && top.dataset.nanoTocBound !== 'true') {
-      top.dataset.nanoTocBound = 'true';
+    if (top && top.dataset.pressTocBound !== 'true') {
+      top.dataset.pressTocBound = 'true';
       top.addEventListener('click', (event) => {
         if (event && typeof event.preventDefault === 'function') event.preventDefault();
         this._scrollToTop();
@@ -589,7 +655,8 @@ export class NanoToc extends HTMLElement {
   }
 
   _contentRoot() {
-    const selector = this.getAttribute('content-selector') || '#mainview';
+    if (isDomElement(this._contentRootElement)) return this._contentRootElement;
+    const selector = this.getAttribute('content-selector') || '[data-theme-region="main"]';
     try {
       return (this.ownerDocument || document).querySelector(selector);
     } catch (_) {
@@ -599,10 +666,15 @@ export class NanoToc extends HTMLElement {
 
   _computePositions() {
     const root = this._contentRoot();
+    const scrollRoot = this._scrollRoot();
+    const scrollTop = this._scrollTop(scrollRoot);
+    const scrollRootTop = scrollRoot && scrollRoot !== window && typeof scrollRoot.getBoundingClientRect === 'function'
+      ? scrollRoot.getBoundingClientRect().top
+      : 0;
     this._headings = root ? Array.from(root.querySelectorAll('h2[id], h3[id]')) : [];
     this._positions = this._headings.map((heading) => ({
       id: heading.id,
-      top: heading.getBoundingClientRect().top + (window.scrollY || 0)
+      top: heading.getBoundingClientRect().top - scrollRootTop + scrollTop
     }));
   }
 
@@ -617,7 +689,7 @@ export class NanoToc extends HTMLElement {
 
   _updateActive() {
     if (!this._positions.length) return;
-    const y = (window.scrollY || 0) + 120;
+    const y = this._scrollTop(this._scrollRoot()) + 120;
     let currentId = this._positions[0] ? this._positions[0].id : '';
     for (let i = 0; i < this._positions.length; i += 1) {
       if (this._positions[i].top <= y) currentId = this._positions[i].id;
@@ -641,7 +713,7 @@ export class NanoToc extends HTMLElement {
       }
       node = node.parentElement;
     }
-    dispatchNanoEvent(this, 'nano:toc-active', { id });
+    dispatchPressEvent(this, 'press:toc-active', { id });
   }
 
   _handleTocLink(event, anchor) {
@@ -652,6 +724,7 @@ export class NanoToc extends HTMLElement {
     this._setActive(id);
     const target = (this.ownerDocument || document).getElementById(id);
     if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    dispatchPressEvent(this, 'press:navigate', { href: `#${id}`, id });
     try {
       const url = new URL(window.location.href);
       url.hash = id ? `#${id}` : '';
@@ -660,6 +733,19 @@ export class NanoToc extends HTMLElement {
   }
 
   _scrollToTop() {
+    const scrollRoot = this._scrollRoot();
+    if (scrollRoot && scrollRoot !== window) {
+      try {
+        scrollRoot.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+        return;
+      } catch (_) {
+        try {
+          scrollRoot.scrollTop = 0;
+          scrollRoot.scrollLeft = 0;
+          return;
+        } catch (__) {}
+      }
+    }
     try {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (_) {
@@ -669,7 +755,10 @@ export class NanoToc extends HTMLElement {
 
   _bindListeners() {
     if (this._listenersBound) return;
-    window.addEventListener('scroll', this._onScroll, { passive: true });
+    const scrollRoot = this._scrollRoot();
+    if (scrollRoot && typeof scrollRoot.addEventListener === 'function') {
+      scrollRoot.addEventListener('scroll', this._onScroll, { passive: true });
+    }
     window.addEventListener('resize', this._onResize);
     window.addEventListener('load', this._onLoad);
     this._listenersBound = true;
@@ -677,10 +766,20 @@ export class NanoToc extends HTMLElement {
 
   _cleanupListeners() {
     if (!this._listenersBound) return;
-    try { window.removeEventListener('scroll', this._onScroll); } catch (_) {}
+    const scrollRoot = this._scrollRoot();
+    try { if (scrollRoot && typeof scrollRoot.removeEventListener === 'function') scrollRoot.removeEventListener('scroll', this._onScroll); } catch (_) {}
     try { window.removeEventListener('resize', this._onResize); } catch (_) {}
     try { window.removeEventListener('load', this._onLoad); } catch (_) {}
     this._listenersBound = false;
+  }
+
+  _scrollRoot() {
+    return isDomElement(this._scrollRootElement) ? this._scrollRootElement : window;
+  }
+
+  _scrollTop(scrollRoot) {
+    if (scrollRoot && scrollRoot !== window) return scrollRoot.scrollTop || 0;
+    return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
   }
 
   _getDepth(el) {
@@ -694,14 +793,49 @@ export class NanoToc extends HTMLElement {
   }
 }
 
-export class NanoPostCard extends HTMLElement {
+export class PressPostCard extends HTMLElement {
   static get observedAttributes() {
-    return ['variant', 'href', 'title', 'date', 'excerpt', 'versions-label', 'draft-label', 'data-idx'];
+    return [
+      'href',
+      'title',
+      'date',
+      'excerpt',
+      'versions-label',
+      'draft-label',
+      'data-idx',
+      'card-class',
+      'with-cover-class',
+      'link-class',
+      'body-class',
+      'title-class',
+      'excerpt-class',
+      'excerpt-inner-class',
+      'meta-class',
+      'date-class',
+      'versions-class',
+      'draft-class',
+      'separator-class',
+      'tags-class',
+      'meta-position',
+      'wrap-card',
+      'use-shadow',
+      'render-root'
+    ];
+  }
+
+  constructor() {
+    super();
+    this._clickHandler = (event) => this._handleClick(event);
   }
 
   connectedCallback() {
     this.style.display = 'contents';
     this.render();
+    this.addEventListener('click', this._clickHandler);
+  }
+
+  disconnectedCallback() {
+    try { this.removeEventListener('click', this._clickHandler); } catch (_) {}
   }
 
   attributeChangedCallback() {
@@ -709,92 +843,127 @@ export class NanoPostCard extends HTMLElement {
   }
 
   render() {
-    const coverTemplate = this.querySelector('template[data-slot="cover"]');
-    const tagsTemplate = this.querySelector('template[data-slot="tags"]');
-    if (coverTemplate) this._coverHtml = coverTemplate.innerHTML || '';
-    if (tagsTemplate) this._tagsHtml = tagsTemplate.innerHTML || '';
-    const variant = (this.getAttribute('variant') || 'native').toLowerCase();
-    if (variant === 'arcus') this.innerHTML = this._renderArcus();
-    else if (variant === 'solstice') this.innerHTML = this._renderSolstice();
-    else this.innerHTML = this._renderNative();
+    this._captureSlotContent();
+    const root = getRenderRoot(this);
+    if (root && root !== this) {
+      root.innerHTML = this._renderCard({ shadow: true });
+    } else {
+      this.innerHTML = this._renderCard();
+    }
   }
 
-  _renderNative() {
+  _captureSlotContent() {
+    ['cover', 'meta', 'actions', 'footer', 'tags'].forEach((name) => {
+      const template = this.querySelector(`template[data-slot="${name}"], template[slot="${name}"]`);
+      const slotted = Array.from(this.querySelectorAll(`[slot="${name}"]`))
+        .filter((node) => node.tagName !== 'TEMPLATE')
+        .map((node) => slottedNodeHtml(node))
+        .join('');
+      const html = template ? (template.innerHTML || '') : slotted;
+      if (name === 'cover' && html) this._coverHtml = html;
+      else if (name === 'meta' && html) this._metaHtml = html;
+      else if (name === 'actions' && html) this._actionsHtml = html;
+      else if (name === 'footer' && html) this._footerHtml = html;
+      else if (name === 'tags' && html) this._tagsHtml = html;
+    });
+  }
+
+  _partSlot(name, html) {
+    return html ? `<span part="${safe(name)}" style="display: contents">${html}</span>` : '';
+  }
+
+  _shadowSlot(name, fallback = '') {
+    if (!fallback && !hasAssignedSlot(this, name)) return '';
+    const slotName = safe(name);
+    return `<span part="${slotName}" style="display: contents"><slot name="${slotName}">${fallback || ''}</slot></span>`;
+  }
+
+  _classAttr(name, fallback = '') {
+    const value = this.hasAttribute(name) ? this.getAttribute(name) : fallback;
+    return safe(value || '');
+  }
+
+  _renderCard(options = {}) {
+    const shadow = options && options.shadow === true;
     const title = safe(this.getAttribute('title') || 'Untitled');
     const href = safe(this.getAttribute('href') || '#');
     const dataIdx = safe(this.getAttribute('data-idx') || encodeURIComponent(this.getAttribute('title') || ''));
     const date = safe(this.getAttribute('date') || '');
     const versions = safe(this.getAttribute('versions-label') || '');
     const draft = safe(this.getAttribute('draft-label') || '');
+    const excerpt = safe(this.getAttribute('excerpt') || '');
+    const hasCover = !!(this._coverHtml || '').trim() || hasAssignedSlot(this, 'cover');
+    const cardClassBase = this._classAttr('card-class', 'press-card');
+    const withCoverClass = this._classAttr('with-cover-class', 'press-card--with-cover');
+    const cardClass = `${cardClassBase}${hasCover && withCoverClass ? ` ${withCoverClass}` : ''}`.trim();
+    const linkClass = this._classAttr('link-class', 'press-card__link');
+    const bodyClass = this._classAttr('body-class', 'press-card__body');
+    const titleClass = this._classAttr('title-class', 'press-card__title');
+    const excerptClass = this._classAttr('excerpt-class', 'press-card__excerpt');
+    const excerptInnerClass = this._classAttr('excerpt-inner-class', '');
+    const metaClass = this._classAttr('meta-class', 'press-card__meta');
+    const dateClass = this._classAttr('date-class', 'press-card__date');
+    const versionsClass = this._classAttr('versions-class', 'press-card__versions');
+    const draftClass = this._classAttr('draft-class', 'press-card__draft');
+    const separatorClass = this._classAttr('separator-class', 'press-card__separator');
+    const tagsClass = this._classAttr('tags-class', 'press-card__tags');
+    const metaPosition = (this.getAttribute('meta-position') || 'after-title').toLowerCase();
+    const wrapCard = this.getAttribute('wrap-card') !== 'false';
     const parts = [];
-    if (date) parts.push(`<span class="card-date">${date}</span>`);
-    if (versions) parts.push(`<span class="card-versions">${versions}</span>`);
-    if (draft) parts.push(`<span class="card-draft">${draft}</span>`);
-    const meta = parts.join('<span class="card-sep">&bull;</span>');
-    return `<a href="${href}" data-idx="${dataIdx}">${this._coverHtml || ''}<div class="card-title">${title}</div><div class="card-excerpt"></div><div class="card-meta">${meta}</div>${this._tagsHtml || ''}</a>`;
-  }
-
-  _renderArcus() {
-    const title = safe(this.getAttribute('title') || 'Untitled');
-    const href = safe(this.getAttribute('href') || '#');
-    const date = safe(this.getAttribute('date') || '');
-    const excerpt = safe(this.getAttribute('excerpt') || '');
-    const hasCover = !!(this._coverHtml || '').trim();
-    const metaLine = (date || this._tagsHtml)
-      ? `<div class="arcus-card__meta-line">${date ? `<span class="arcus-card__meta-date">${date}</span>` : ''}${date && this._tagsHtml ? '<span class="arcus-card__meta-separator" aria-hidden="true">&bull;</span>' : ''}${this._tagsHtml ? `<div class="arcus-card__tags">${this._tagsHtml}</div>` : ''}</div>`
+    if (date) parts.push(`<span class="${dateClass}">${date}</span>`);
+    if (versions) parts.push(`<span class="${versionsClass}">${versions}</span>`);
+    if (draft) parts.push(`<span class="${draftClass}">${draft}</span>`);
+    const separator = `<span class="${separatorClass}" aria-hidden="true">&bull;</span>`;
+    const meta = this._metaHtml || parts.join(separator);
+    const excerptHtml = excerpt
+      ? `<p class="${excerptClass}" part="excerpt">${excerptInnerClass ? `<span class="${excerptInnerClass}">${excerpt}</span>` : excerpt}</p>`
+      : `<div class="${excerptClass}" part="excerpt"></div>`;
+    const titleHtml = `<h3 class="${titleClass}" part="title">${title}</h3>`;
+    const metaHtml = `<div class="${metaClass}" part="meta">${shadow ? `<slot name="meta">${meta}</slot>` : meta}</div>`;
+    const tagsHtml = (this._tagsHtml || hasAssignedSlot(this, 'tags'))
+      ? `<div class="${tagsClass}" part="tags">${shadow ? `<slot name="tags">${this._tagsHtml || ''}</slot>` : this._tagsHtml}</div>`
       : '';
-    return `<article class="arcus-card${hasCover ? ' arcus-card--with-cover' : ''}">
-      <a class="arcus-card__link" href="${href}">
-        ${this._coverHtml || ''}
-        <div class="arcus-card__body">
-          ${metaLine}
-          <h3 class="arcus-card__title">${title}</h3>
-          ${excerpt ? `<p class="arcus-card__excerpt"><span class="arcus-card__excerpt-tilt">${excerpt}</span></p>` : ''}
+    const bodyParts = metaPosition === 'before-title'
+      ? [metaHtml, titleHtml, excerptHtml, tagsHtml]
+      : (metaPosition === 'after-excerpt'
+          ? [titleHtml, excerptHtml, metaHtml, tagsHtml]
+          : [titleHtml, metaHtml, excerptHtml, tagsHtml]);
+    const inner = `
+      <a class="${linkClass}" part="link" href="${href}" data-idx="${dataIdx}">
+        ${shadow ? this._shadowSlot('cover', this._coverHtml) : this._partSlot('cover', this._coverHtml)}
+        <div class="${bodyClass}" part="body">
+          ${bodyParts.join('')}
+          ${shadow ? this._shadowSlot('actions', this._actionsHtml) : this._partSlot('actions', this._actionsHtml)}
+          ${shadow ? this._shadowSlot('footer', this._footerHtml) : this._partSlot('footer', this._footerHtml)}
         </div>
-      </a>
-    </article>`;
+      </a>`;
+    if (!wrapCard) {
+      const directClass = linkClass || cardClass;
+      return inner.replace('part="link"', 'part="card link"').replace(`class="${linkClass}"`, `class="${directClass}"`);
+    }
+    return `<article class="${cardClass}" part="card">${inner}</article>`;
   }
 
-  _renderSolstice() {
-    const title = safe(this.getAttribute('title') || 'Untitled');
-    const href = safe(this.getAttribute('href') || '#');
-    const date = safe(this.getAttribute('date') || '');
-    const excerpt = safe(this.getAttribute('excerpt') || '');
-    const hasCover = !!(this._coverHtml || '').trim();
-    return `<article class="solstice-card${hasCover ? ' solstice-card--with-cover' : ''}">
-      <a class="solstice-card__link" href="${href}">
-        ${this._coverHtml || ''}
-        <div class="solstice-card__body">
-          <h3 class="solstice-card__title">${title}</h3>
-          ${date ? `<div class="solstice-card__meta">${date}</div>` : ''}
-          ${excerpt ? `<p class="solstice-card__excerpt">${excerpt}</p>` : ''}
-          ${this._tagsHtml ? `<div class="solstice-card__tags">${this._tagsHtml}</div>` : ''}
-        </div>
-      </a>
-    </article>`;
+  _handleClick(event) {
+    const target = event && event.target;
+    const path = event && typeof event.composedPath === 'function' ? event.composedPath() : [];
+    const linkFromPath = path.find((node) => node && node.tagName === 'A' && typeof node.getAttribute === 'function' && node.getAttribute('href'));
+    const link = linkFromPath || (target && target.closest ? target.closest('a[href]') : null);
+    if (!link) return;
+    const root = typeof link.getRootNode === 'function' ? link.getRootNode() : null;
+    if (!this.contains(link) && root !== this.shadowRoot) return;
+    dispatchPressEvent(this, 'press:navigate', {
+      href: link.getAttribute('href') || '',
+      title: this.getAttribute('title') || ''
+    });
   }
 }
 
-export function renderNanoPostCardHtml({
-  variant = 'native',
-  title = '',
-  href = '#',
-  dataIdx = '',
-  date = '',
-  excerpt = '',
-  versionsLabel = '',
-  draftLabel = '',
-  coverHtml = '',
-  tagsHtml = ''
-} = {}) {
-  return `<nano-post-card variant="${safe(variant)}" href="${safe(href)}" title="${safe(title)}" data-idx="${safe(dataIdx || encodeURIComponent(title || ''))}" date="${safe(date)}" excerpt="${safe(excerpt)}" versions-label="${safe(versionsLabel)}" draft-label="${safe(draftLabel)}"><template data-slot="cover">${coverHtml || ''}</template><template data-slot="tags">${tagsHtml || ''}</template></nano-post-card>`;
+export function registerPressComponents() {
+  defineElement('press-search', PressSearch);
+  defineElement('press-theme-controls', PressThemeControls);
+  defineElement('press-toc', PressToc);
+  defineElement('press-post-card', PressPostCard);
 }
 
-export function registerNanoComponents() {
-  defineElement('nano-search', NanoSearch);
-  defineElement('nano-theme-controls', NanoThemeControls);
-  defineElement('nano-toc', NanoToc);
-  defineElement('nano-post-card', NanoPostCard);
-}
-
-registerNanoComponents();
+registerPressComponents();

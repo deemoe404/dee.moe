@@ -4,17 +4,23 @@ export function mount(context = {}) {
   const content = regions.content || doc.querySelector('.content');
   if (!doc || !content) return context;
 
-  let mainview = doc.getElementById('mainview');
+  let mainview = content.querySelector('[data-theme-region="main"]') || content.querySelector('.native-mainview');
   if (!mainview) {
     mainview = doc.createElement('div');
-    mainview.className = 'box';
-    mainview.id = 'mainview';
+    mainview.className = 'box native-mainview';
+    mainview.setAttribute('data-theme-region', 'main');
     content.appendChild(mainview);
   } else if (!mainview.classList.contains('box')) {
     mainview.classList.add('box');
   }
+  mainview.classList.add('native-mainview');
+  mainview.setAttribute('data-theme-region', 'main');
 
-  const updatedRegions = { ...regions, mainview };
-  context.regions = updatedRegions;
-  return { regions: updatedRegions };
+  if (typeof regions.register === 'function') {
+    regions.register('main', mainview);
+  } else {
+    regions.main = mainview;
+  }
+  context.regions = regions;
+  return { regions };
 }

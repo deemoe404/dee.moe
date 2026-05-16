@@ -3,18 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Markdown Editor - NanoSite</title>
-  <script src="assets/js/theme-boot.js"></script>
+  <title>Markdown Editor - Press</title>
   <script>
-    // Early boot to avoid initial flash
     (function () {
       try {
+        var saved = localStorage.getItem('theme');
+        if (saved === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+        else if (saved === 'light') document.documentElement.removeAttribute('data-theme');
+        else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
         document.documentElement.removeAttribute('data-init-mode');
         document.documentElement.setAttribute('data-init-cfile', 'site');
       } catch (_) { /* ignore */ }
     })();
   </script>
-  <link rel="stylesheet" id="theme-pack">
+  <link rel="stylesheet" href="assets/themes/native/theme.css?v=press-system-v3.4.16" data-editor-native-theme>
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     html { height: 100%; }
@@ -329,10 +333,10 @@
     .updates-meta { display:flex; flex-direction:column; gap:.15rem; font-size:.92rem; color: color-mix(in srgb, var(--muted) 80%, transparent); }
     .updates-meta span { line-height:1.4; }
     .updates-header-actions { display:flex; align-items:center; gap:.75rem; flex-wrap:wrap; }
-    #btnSystemSelect[data-state="busy"] { pointer-events:none; opacity:.82; }
-    #btnSystemSelect[data-state="busy"]::after { content:''; display:inline-block; width:1rem; height:1rem; margin-left:.5rem; border:2px solid color-mix(in srgb, var(--primary) 40%, transparent); border-top-color: color-mix(in srgb, var(--primary) 86%, transparent); border-radius:50%; animation: ns-updates-spin .85s linear infinite; vertical-align:middle; }
+    #btnSystemDownload[data-state="busy"], #btnSystemSelect[data-state="busy"] { pointer-events:none; opacity:.82; }
+    #btnSystemDownload[data-state="busy"]::after, #btnSystemSelect[data-state="busy"]::after { content:''; display:inline-block; width:1rem; height:1rem; margin-left:.5rem; border:2px solid color-mix(in srgb, var(--primary) 40%, transparent); border-top-color: color-mix(in srgb, var(--primary) 86%, transparent); border-radius:50%; animation: press-updates-spin .85s linear infinite; vertical-align:middle; }
     .updates-download[aria-disabled="true"] { pointer-events:none; opacity:.55; }
-    @keyframes ns-updates-spin { to { transform: rotate(360deg); } }
+    @keyframes press-updates-spin { to { transform: rotate(360deg); } }
     .updates-status { margin:0; font-size:.95rem; color: color-mix(in srgb, var(--muted) 82%, transparent); }
     .updates-status[data-tone="warn"] { color: #b45309; }
     .updates-status[data-tone="error"] { color: #dc2626; }
@@ -355,6 +359,19 @@
     .updates-release-notes ul,
     .updates-release-notes ol { margin:.6rem 0 .6rem 1.2rem; padding:0; }
     .updates-release-notes code { background: color-mix(in srgb, var(--border) 60%, transparent); padding:.15rem .4rem; border-radius:6px; font-size:.85rem; }
+    .theme-manager-tabs { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; }
+    .theme-manager-tabs .btn-secondary.is-active { background:color-mix(in srgb, var(--primary) 12%, var(--card)); color:var(--primary); border-color:color-mix(in srgb, var(--primary) 34%, var(--border)); }
+    .theme-manager-panel[hidden] { display:none !important; }
+    .theme-manager-list { display:flex; flex-direction:column; gap:.65rem; }
+    .theme-manager-row { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.85rem; padding:.75rem .85rem; border:1px solid color-mix(in srgb, var(--border) 82%, transparent); border-radius:8px; background:color-mix(in srgb, var(--card) 96%, transparent); }
+    .theme-manager-row-body { min-width:0; display:flex; flex-direction:column; gap:.2rem; }
+    .theme-manager-row-body strong { font-size:1rem; color:color-mix(in srgb, var(--text) 92%, transparent); }
+    .theme-manager-row-actions { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; }
+    .theme-manager-import { display:flex; flex-direction:column; align-items:flex-start; gap:.75rem; }
+    #btnThemeImport[data-state="busy"],
+    #btnThemeImportInline[data-state="busy"],
+    #btnThemeRefreshCatalog[data-state="busy"],
+    #btnThemeClearStaged[data-state="busy"] { pointer-events:none; opacity:.82; }
     .sync-layout {
       display:flex;
       flex-direction:column;
@@ -1343,7 +1360,7 @@
     .markdown-blocks-shell { position:relative; display:flex; flex-direction:column; gap:.65rem; padding:0; border-radius:0; background:transparent; color:var(--text); }
     .markdown-blocks-shell, .blocks-list, .blocks-block, .blocks-block-body, .blocks-virtual-block { cursor:text; }
     .markdown-blocks-shell[hidden] { display:none !important; }
-    .blocks-block-head, .blocks-link-editor, .blocks-image-meta-controls, .blocks-inspector, .blocks-card-picker, .blocks-command-menu, .blocks-action-menu, .blocks-inline-more-menu { cursor:default; }
+    .blocks-block-head, .blocks-link-editor, .blocks-math-editor, .blocks-image-meta-controls, .blocks-inspector, .blocks-card-picker, .blocks-command-menu, .blocks-action-menu, .blocks-inline-more-menu { cursor:default; }
     .blocks-btn, .blocks-icon-btn, .blocks-inline-btn, .blocks-card-result, .blocks-command-menu-item, .blocks-action-menu-item, .blocks-inline-menu-item { border:1px solid var(--border); background:var(--card); color:var(--text); border-radius:7px; font:inherit; font-size:.86rem; line-height:1.1; padding:.42rem .58rem; cursor:pointer; transition:background .16s ease, border-color .16s ease, color .16s ease; }
     .blocks-btn:hover, .blocks-btn:focus-visible, .blocks-icon-btn:hover:not(:disabled), .blocks-icon-btn:focus-visible:not(:disabled), .blocks-inline-btn:hover, .blocks-inline-btn:focus-visible, .blocks-card-result:hover, .blocks-card-result:focus-visible, .blocks-command-menu-item:hover:not(:disabled), .blocks-command-menu-item:focus-visible:not(:disabled), .blocks-action-menu-item:hover:not(:disabled), .blocks-action-menu-item:focus-visible:not(:disabled), .blocks-inline-menu-item:hover:not(:disabled), .blocks-inline-menu-item:focus-visible:not(:disabled) { background:color-mix(in srgb, var(--primary) 10%, var(--card)); border-color:color-mix(in srgb, var(--primary) 45%, var(--border)); color:color-mix(in srgb, var(--primary) 92%, var(--text)); outline:none; }
     .blocks-inline-btn { min-width:2rem; min-height:1.85rem; padding:.25rem .45rem; font-weight:700; }
@@ -1353,6 +1370,9 @@
     .blocks-link-editor { position:absolute; z-index:180; display:inline-flex; align-items:center; gap:.35rem; max-width:min(100%, 36rem); padding:.35rem; border:1px solid var(--border); border-radius:8px; background:var(--card); box-shadow:0 10px 22px rgba(15,23,42,.14); }
     .blocks-link-editor[hidden] { display:none !important; }
     .blocks-link-editor input { box-sizing:border-box; min-height:1.85rem; width:min(11rem, 26vw); border:1px solid var(--border); border-radius:7px; background:var(--card); color:var(--text); font:inherit; font-size:.84rem; line-height:1.2; padding:.25rem .45rem; }
+    .blocks-math-editor { position:absolute; z-index:180; display:flex; align-items:flex-start; gap:.35rem; width:min(32rem, 100%); padding:.35rem; border:1px solid var(--border); border-radius:8px; background:var(--card); box-shadow:0 10px 22px rgba(15,23,42,.14); }
+    .blocks-math-editor[hidden] { display:none !important; }
+    .blocks-math-editor textarea { box-sizing:border-box; min-height:4.5rem; max-height:14rem; flex:1 1 auto; resize:vertical; border:1px solid var(--border); border-radius:7px; background:var(--card); color:var(--text); font:13px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Ubuntu Mono", monospace; padding:.4rem .5rem; }
     .blocks-icon-btn { min-width:1.85rem; min-height:1.85rem; padding:.25rem .4rem; font-weight:700; }
     .blocks-icon-btn:disabled { opacity:.45; cursor:not-allowed; }
     .blocks-list { display:block; padding-top:0; }
@@ -1365,7 +1385,7 @@
     .blocks-command-menu[hidden] { display:none !important; }
     .blocks-command-menu-item { display:flex; align-items:center; gap:.45rem; justify-content:flex-start; text-align:left; min-height:2.1rem; }
     .blocks-command-menu-item svg { display:block; width:1rem; height:1rem; flex:0 0 auto; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
-    .blocks-block-paragraph, .blocks-block-source { margin:.85rem 0; }
+    .blocks-block-paragraph, .blocks-block-source, .blocks-block-table { margin:.85rem 0; }
     .blocks-block-paragraph + .blocks-block-paragraph { margin-top:1rem; }
     .blocks-block-heading { --blocks-heading-font-size:1.65rem; margin:calc(var(--blocks-heading-font-size) * 1.2) 0 calc(var(--blocks-heading-font-size) * .5); }
     .blocks-block-heading:has(.blocks-heading-h1) { --blocks-heading-font-size:2rem; }
@@ -1378,6 +1398,7 @@
     .blocks-block-quote { margin:1.2em 0; }
     .blocks-block-image, .blocks-block-card { margin:1rem 0; }
     .blocks-block-code { margin:.75rem 0; }
+    .blocks-block-math { margin:1rem 0; }
     .blocks-block:focus, .blocks-block:focus-visible { outline:none; }
     .blocks-block.is-reordering { z-index:1; transition:transform .24s cubic-bezier(.2,.8,.2,1); will-change:transform; }
     .blocks-block::before { content:""; position:absolute; z-index:40; top:.15rem; bottom:.15rem; left:-.2rem; width:.078125rem; border-radius:999px; background:color-mix(in srgb, var(--primary) 42%, #60a5fa); box-shadow:0 0 0 1px color-mix(in srgb, var(--primary) 8%, transparent), 0 0 5px 1px color-mix(in srgb, var(--primary) 10%, transparent); opacity:0; pointer-events:none; transition:opacity .16s ease, background .16s ease, box-shadow .16s ease; }
@@ -1415,21 +1436,29 @@
     .blocks-action-menu-item:disabled { opacity:.45; cursor:not-allowed; }
     .blocks-action-menu-delete { color:color-mix(in srgb, #dc2626 82%, var(--text)); }
     .blocks-action-menu-delete:hover:not(:disabled), .blocks-action-menu-delete:focus-visible:not(:disabled) { background:color-mix(in srgb, #dc2626 12%, var(--card)); border-color:var(--card); color:#b91c1c; }
-    .blocks-block-head .blocks-heading-level, .blocks-block-head .blocks-list-type-select, .blocks-block-head .blocks-code-language, .blocks-block-head .blocks-image-meta-controls input, .blocks-block-head .blocks-image-replace { min-height:1.65rem; border:1px solid var(--border); border-radius:999px; background:var(--card); color:var(--text); font:inherit; font-size:.8rem; line-height:1.2; padding:.12rem .55rem; }
-    .blocks-block-head .blocks-heading-level, .blocks-block-head .blocks-list-type-select, .blocks-block-head .blocks-code-language { padding-right:1.45rem; }
+    .blocks-block-head .blocks-heading-level, .blocks-block-head .blocks-list-type-select, .blocks-block-head .blocks-code-language, .blocks-block-head .blocks-table-align-select, .blocks-block-head .blocks-image-meta-controls input, .blocks-block-head .blocks-image-replace, .blocks-block-head .blocks-image-delete-resource, .blocks-block-head .blocks-math-edit { min-height:1.65rem; border:1px solid var(--border); border-radius:999px; background:var(--card); color:var(--text); font:inherit; font-size:.8rem; line-height:1.2; padding:.12rem .55rem; }
+    .blocks-block-head .blocks-heading-level, .blocks-block-head .blocks-list-type-select, .blocks-block-head .blocks-code-language, .blocks-block-head .blocks-table-align-select { padding-right:1.45rem; }
     .blocks-block-head .blocks-code-language { width:8.5rem; max-width:26vw; cursor:pointer; }
+    .blocks-table-controls { display:flex; align-items:center; gap:.24rem; margin-left:.16rem; padding-left:.34rem; border-left:1px solid var(--border); }
+    .blocks-block-head .blocks-table-align-select { width:7.25rem; max-width:18vw; cursor:pointer; }
+    .blocks-table-controls .blocks-icon-btn { min-width:auto; white-space:nowrap; font-size:.78rem; padding:.25rem .48rem; }
     .blocks-image-meta-controls { display:flex; align-items:center; gap:.24rem; margin-left:.16rem; padding-left:.34rem; border-left:1px solid var(--border); }
     .blocks-block-head .blocks-image-meta-controls input { width:clamp(6.5rem, 12vw, 10rem); max-width:18vw; }
-    .blocks-block-head .blocks-image-replace { white-space:nowrap; cursor:pointer; }
+    .blocks-block-head .blocks-image-replace, .blocks-block-head .blocks-image-delete-resource { white-space:nowrap; cursor:pointer; }
+    .blocks-block-head .blocks-image-delete-resource:not(:disabled) { color:color-mix(in srgb, #dc2626 82%, var(--text)); }
+    .blocks-block-head .blocks-image-delete-resource:disabled { opacity:.45; cursor:not-allowed; }
     .blocks-block-body { display:flex; flex-direction:column; gap:.7rem; padding:0; }
     .blocks-heading-controls, .blocks-inspector { display:flex; align-items:center; gap:.45rem; flex-wrap:wrap; }
     .blocks-inspector input, .blocks-inspector select, .blocks-heading-level, .blocks-textarea, .blocks-block input, .blocks-block select, .blocks-card-search { box-sizing:border-box; border:1px solid color-mix(in srgb, var(--border) 82%, transparent); border-radius:7px; background:color-mix(in srgb, var(--card) 96%, transparent); color:var(--text); font:inherit; line-height:1.45; padding:.5rem .6rem; }
-    .blocks-rich-editable, .blocks-code-preview code, .blocks-block input, .blocks-block textarea, .blocks-link-editor input, .blocks-card-search { cursor:text; }
+    .blocks-rich-editable, .blocks-code-preview code, .blocks-block input, .blocks-block textarea, .blocks-link-editor input, .blocks-math-editor textarea, .blocks-card-search { cursor:text; }
     .blocks-block select { cursor:default; }
     .blocks-inspector input { min-width:min(18rem, 100%); flex:1 1 12rem; }
     .blocks-rich-editable { outline:none; min-height:1.65em; line-height:1.65; border-radius:6px; padding:.2rem .25rem; }
     .blocks-rich-editable:focus, .blocks-textarea:focus, .blocks-block input:focus, .blocks-block select:focus, .blocks-card-search:focus { outline:2px solid color-mix(in srgb, var(--primary) 45%, transparent); outline-offset:2px; border-color:color-mix(in srgb, var(--primary) 45%, var(--border)); }
     .blocks-rich-editable a { color:var(--primary); text-decoration:underline; cursor:text; }
+    .blocks-inline-math { display:inline-block; min-width:.8em; padding:0 .12em; border-radius:4px; background:color-mix(in srgb, var(--primary) 7%, transparent); cursor:pointer; vertical-align:baseline; }
+    .blocks-math-preview { min-height:3rem; padding:.75rem .85rem; border:1px solid color-mix(in srgb, var(--border) 80%, transparent); border-radius:8px; background:color-mix(in srgb, var(--card) 96%, transparent); cursor:pointer; }
+    .blocks-display-math { min-height:1.5rem; text-align:center; }
     .blocks-paragraph-text, .blocks-list-text, .blocks-quote-text { font-family:var(--serif, var(--article-serif-stack, Georgia, "Times New Roman", Times, serif)); }
     .blocks-paragraph-text { margin:0; font-size:1rem; }
     .blocks-paragraph-text:focus { outline:none; box-shadow:none; }
@@ -1455,8 +1484,9 @@
     .blocks-image-placeholder::after { content:""; position:absolute; inset:0; background:linear-gradient(to top right, transparent calc(50% - .75px), color-mix(in srgb, var(--muted) 45%, transparent) 50%, transparent calc(50% + .75px)); }
     .blocks-image-figure.is-image-placeholder .blocks-image-placeholder { display:flex; }
     .blocks-image-placeholder-label { position:relative; z-index:1; max-width:min(22rem, 80%); font-family:var(--sans, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); font-size:.88rem; line-height:1.25; }
-    .blocks-image-figure figcaption { margin-top:.5em; color:var(--muted); font-family:var(--serif, var(--article-serif-stack, Georgia, "Times New Roman", Times, serif)); font-size:.9em; text-align:center; word-break:break-word; }
-    .blocks-image-figure figcaption[hidden] { display:none !important; }
+    .blocks-image-figure figcaption { margin-top:.5em; min-height:1.45em; color:var(--muted); font-family:var(--serif, var(--article-serif-stack, Georgia, "Times New Roman", Times, serif)); font-size:.9em; text-align:center; word-break:break-word; outline:none; border-radius:6px; cursor:text; }
+    .blocks-image-figure figcaption:focus { outline:none; box-shadow:none; }
+    .blocks-image-figure figcaption.is-empty::before { content:attr(data-placeholder); color:color-mix(in srgb, var(--muted) 58%, transparent); pointer-events:none; }
     .blocks-visual-list { margin:0 0 0 1.25rem; padding-left:0; font-family:var(--serif, var(--article-serif-stack, Georgia, "Times New Roman", Times, serif)); font-size:1.04rem; line-height:1.75; letter-spacing:.005em; }
     .blocks-visual-list-standard { margin-left:0; padding-left:0; }
     .blocks-visual-list-task { list-style:none; margin-left:0; padding-left:0; }
@@ -1473,6 +1503,17 @@
     .blocks-list-text:focus { outline:none; box-shadow:none; }
     .blocks-visual-list-standard .blocks-list-text { grid-column:2; display:block; }
     .blocks-visual-list-task .blocks-list-text { grid-column:2; display:block; }
+    .blocks-table-wrap { width:100%; overflow:auto; border:1px solid var(--border); border-radius:.65rem; background:color-mix(in srgb, var(--card) 96%, var(--bg)); box-shadow:var(--shadow); }
+    .blocks-table { width:100%; min-width:34rem; border-collapse:collapse; table-layout:fixed; font-family:var(--serif, var(--article-serif-stack, Georgia, "Times New Roman", Times, serif)); font-size:1rem; line-height:1.55; }
+    .blocks-table th, .blocks-table td { border:1px solid color-mix(in srgb, var(--border) 92%, transparent); padding:0; vertical-align:top; }
+    .blocks-table th { background:color-mix(in srgb, var(--text) 4%, transparent); font-weight:700; }
+    .blocks-table-cell-input { box-sizing:border-box; display:block; width:100%; min-width:0; border:0; border-radius:0; background:transparent; color:var(--text); font:inherit; line-height:inherit; padding:.68rem .78rem; outline:none; }
+    .blocks-table-header-cell { font-weight:700; }
+    .blocks-table-cell-input:focus { background:color-mix(in srgb, var(--primary) 9%, transparent); box-shadow:inset 0 0 0 2px color-mix(in srgb, var(--primary) 36%, transparent); }
+    .blocks-table-align-left { text-align:left; }
+    .blocks-table-align-center { text-align:center; }
+    .blocks-table-align-right { text-align:right; }
+    .blocks-table-align-default { text-align:inherit; }
     .blocks-code-preview { margin:0; padding:1rem 1.1rem; border-radius:0.5rem; overflow:hidden; background-color:var(--code-bg); border:0.0625rem solid var(--border); box-shadow:var(--shadow); color:var(--code-text); position:relative; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:.893rem; line-height:1.55; tab-size:2; }
     .blocks-code-scroll { display:flex; align-items:stretch; min-width:0; width:100%; overflow:auto; overflow-y:hidden; }
     .blocks-code-gutter { flex:0 0 auto; position:sticky; left:0; z-index:1; box-sizing:border-box; padding-right:.75rem; margin-right:.75rem; border-right:1px solid color-mix(in srgb, var(--code-text) 12%, transparent); background:var(--code-bg); color:color-mix(in srgb, var(--code-text) 60%, transparent); text-align:right; user-select:none; font:inherit; font-variant-numeric:tabular-nums; }
@@ -1679,6 +1720,28 @@
       border-color:color-mix(in srgb, var(--border) 85%, transparent) !important;
       font-weight:500;
     }
+    .frontmatter-protection-grid {
+      margin-top:0.1rem;
+    }
+    .frontmatter-protection-switch {
+      position:relative;
+    }
+    .frontmatter-protection-switch.is-disabled {
+      opacity:.56;
+      cursor:not-allowed;
+    }
+    .frontmatter-protection-switch.is-disabled .frontmatter-switch-track {
+      cursor:not-allowed;
+    }
+    .frontmatter-protection-switch .btn-label {
+      position:absolute;
+      width:1px;
+      height:1px;
+      overflow:hidden;
+      clip:rect(0 0 0 0);
+      clip-path:inset(50%);
+      white-space:nowrap;
+    }
     button#btnDiscard.btn-secondary {
       background:#e15b5b !important;
       color:#3f1010 !important;
@@ -1707,15 +1770,65 @@
     button#btnReview.btn-secondary:hover { background:#e6b541 !important; }
     button#btnReview.btn-secondary:active { background:#cf9830 !important; }
     button#btnReview.btn-secondary:focus-visible { outline:2px solid #f7d98f66; outline-offset:2px; }
+    .composer-protection-modal {
+      position:fixed;
+      inset:0;
+      z-index:9999;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:1rem;
+      background:rgba(15, 23, 42, .38);
+    }
+    .composer-protection-modal[hidden] { display:none; }
+    .composer-protection-card {
+      width:min(92vw, 420px);
+      padding:1.1rem;
+      border:1px solid color-mix(in srgb, var(--border) 82%, transparent);
+      border-radius:8px;
+      background:var(--card);
+      box-shadow:0 24px 56px rgba(15, 23, 42, .22);
+    }
+    .composer-protection-title {
+      margin:0 0 .35rem;
+      font-size:1.05rem;
+      line-height:1.3;
+    }
+    .composer-protection-message {
+      margin:0 0 .85rem;
+      color:var(--muted);
+      font-size:.9rem;
+      line-height:1.45;
+    }
+    .composer-protection-field {
+      display:grid;
+      gap:.35rem;
+      margin:.7rem 0;
+    }
+    .composer-protection-label {
+      font-size:.82rem;
+      font-weight:700;
+      color:color-mix(in srgb, var(--text) 84%, transparent);
+    }
+    .composer-protection-input {
+      width:100%;
+      box-sizing:border-box;
+    }
+    .composer-protection-error {
+      min-height:1em;
+      margin-top:.25rem;
+    }
     .view-toggle { --vt-button-width:2.35rem; --vt-button-height:1.765rem; --vt-pad:.18rem; --vt-gap:.18rem; position:relative; display:inline-flex; align-items:center; gap:var(--vt-gap); padding:var(--vt-pad); border-radius:12px; border:1px solid color-mix(in srgb, var(--border) 86%, transparent); background:color-mix(in srgb, var(--text) 5%, var(--card)); box-shadow:inset 0 1px 0 color-mix(in srgb, var(--card) 92%, transparent), 0 1px 2px rgba(15,23,42,.06); overflow:visible; }
     .wrap-toggle { display:inline-flex; align-items:center; gap:.35rem; font-size:.92rem; color:#57606a; }
     .view-toggle .vt-label { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); clip-path:inset(50%); white-space:nowrap; }
     .wrap-toggle .vt-label { color:#6e7781; font-weight:500; margin-right:.25rem; }
     .view-toggle .dim { display:none; }
     .view-toggle .vt-slider { position:absolute; z-index:0; top:var(--vt-pad); left:var(--vt-pad); width:var(--vt-button-width); height:var(--vt-button-height); border-radius:10px; background:color-mix(in srgb, var(--card) 99%, transparent); box-shadow:0 4px 12px rgba(15,23,42,.12), 0 1px 2px rgba(15,23,42,.08); transform:translateX(0); transition:transform .22s var(--composer-inline-ease, cubic-bezier(0.16, 1, 0.3, 1)), box-shadow .18s ease; pointer-events:none; }
-    .view-toggle[data-view="blocks"] .vt-slider { transform:translateX(calc(var(--vt-button-width) + var(--vt-gap))); }
-    .view-toggle[data-view="preview"] .vt-slider { transform:translateX(calc((var(--vt-button-width) + var(--vt-gap)) * 2)); }
+    .view-toggle[data-view="edit"] .vt-slider { transform:translateX(calc(var(--vt-button-width) + var(--vt-gap))); }
     .view-toggle .vt-btn { position:relative; z-index:1; display:inline-flex; align-items:center; justify-content:center; width:var(--vt-button-width); height:var(--vt-button-height); border-radius:10px; color:color-mix(in srgb, var(--muted) 82%, var(--text)); text-decoration:none; line-height:1; transition:color .16s ease, transform .16s ease; }
+    .editor-preview-open { display:inline-flex; align-items:center; justify-content:center; width:2.35rem; height:2.125rem; min-height:2.125rem; padding:0; border-radius:10px; }
+    .editor-preview-open .vt-icon { width:1.2rem; height:1.2rem; display:block; stroke:currentColor; stroke-width:2; fill:none; stroke-linecap:round; stroke-linejoin:round; }
+    .editor-preview-open .vt-text { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); clip-path:inset(50%); white-space:nowrap; }
     .wrap-toggle .vt-btn { color:#0969da; text-decoration:none; padding:.1rem .25rem; border-radius:6px; position:relative; }
     .view-toggle .vt-btn:hover { color:color-mix(in srgb, var(--primary) 82%, var(--text)); text-decoration:none; }
     .wrap-toggle .vt-btn:hover { text-decoration:underline; }
@@ -1730,6 +1843,49 @@
     .view-toggle .vt-btn .vt-dirty-badge{position:absolute;top:-.45rem;right:0;min-width:1.15rem;height:1.15rem;padding:0 .32rem;border-radius:999px;background:#ef4444;color:#fff;font-size:.68rem;font-weight:700;line-height:1;display:inline-flex;align-items:center;justify-content:center;box-shadow:0 3px 7px rgba(15,23,42,.2),0 0 0 2px var(--card);opacity:0;transform:translateX(50%) scale(.72);transition:opacity .16s ease,transform .16s ease;pointer-events:none;z-index:2;font-feature-settings:'tnum' 1,'case' 1}
     .view-toggle .vt-btn .vt-dirty-badge[hidden]{display:none}
     .view-toggle .vt-btn.has-draft .vt-dirty-badge{opacity:1;transform:translateX(50%) scale(1)}
+    .preview-theme-control { display:inline-flex; align-items:center; gap:.45rem; min-height:2rem; padding:.18rem .25rem .18rem .5rem; border:1px solid color-mix(in srgb, var(--border) 86%, transparent); border-radius:8px; background:color-mix(in srgb, var(--card) 96%, transparent); color:var(--text); }
+    .preview-theme-label { color:color-mix(in srgb, var(--muted) 92%, var(--text)); font-size:.78rem; font-weight:700; line-height:1; white-space:nowrap; }
+    .preview-theme-select { min-width:8.5rem; max-width:14rem; height:1.7rem; border:1px solid color-mix(in srgb, var(--border) 88%, transparent); border-radius:8px; background:var(--card); color:var(--text); font:inherit; font-size:.82rem; line-height:1.1; padding:.15rem 1.8rem .15rem .45rem; }
+    .editor-preview-overlay { position:fixed; inset:0; z-index:5000; display:grid; grid-template-rows:auto minmax(0, 1fr); width:100vw; height:100vh; min-width:0; min-height:0; margin:0; padding:0; border:0; border-radius:0; background:var(--bg); overflow:hidden; box-shadow:none; opacity:0; transform:translateY(10px) scale(.985); transform-origin:center; pointer-events:none; transition:opacity .22s ease, transform .26s cubic-bezier(.16, 1, .3, 1); will-change:opacity, transform; }
+    .editor-preview-overlay[hidden] { display:none !important; }
+    .editor-preview-overlay.is-open { opacity:1; transform:translateY(0) scale(1); pointer-events:auto; }
+    .editor-preview-overlay.is-closing { opacity:0; transform:translateY(8px) scale(.985); pointer-events:none; }
+    .editor-preview-toolbar { display:flex; align-items:center; justify-content:space-between; gap:1rem; min-width:0; min-height:2.85rem; padding:.45rem .75rem; border-bottom:1px solid var(--border); background:color-mix(in srgb, var(--bg) 96%, var(--card) 4%); opacity:0; transform:translateY(-8px); transition:opacity .2s ease .04s, transform .24s cubic-bezier(.16, 1, .3, 1) .04s; will-change:opacity, transform; }
+    .editor-preview-overlay.is-open .editor-preview-toolbar { opacity:1; transform:translateY(0); }
+    .editor-preview-overlay.is-closing .editor-preview-toolbar { opacity:0; transform:translateY(-8px); transition-delay:0s; }
+    .editor-preview-toolbar-main { display:flex; align-items:center; gap:.7rem; min-width:0; }
+    .editor-preview-mode-label { flex:0 0 auto; font-size:.78rem; font-weight:800; letter-spacing:.02em; color:var(--primary); text-transform:uppercase; }
+    .editor-preview-path { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:color-mix(in srgb, var(--text) 88%, var(--muted)); font-size:.88rem; }
+    .editor-preview-toolbar-actions { display:flex; align-items:center; justify-content:flex-end; gap:.55rem; flex:0 0 auto; }
+    .editor-preview-close { width:2rem; height:2rem; padding:0; border-radius:8px; font-size:1.2rem; line-height:1; }
+    .editor-preview-viewport-shell { min-width:0; min-height:0; overflow:hidden; display:flex; align-items:stretch; justify-content:center; background:var(--bg); opacity:0; transform:translateY(16px) scale(.992); transition:opacity .22s ease .06s, transform .28s cubic-bezier(.16, 1, .3, 1) .06s; will-change:opacity, transform; }
+    .editor-preview-overlay.is-open .editor-preview-viewport-shell { opacity:1; transform:translateY(0) scale(1); }
+    .editor-preview-overlay.is-closing .editor-preview-viewport-shell { opacity:0; transform:translateY(12px) scale(.992); transition-delay:0s; }
+    .editor-preview-frame-sizer { position:relative; width:calc(100% - 36px); max-width:calc(100% - 36px); min-width:min(360px, calc(100% - 36px)); height:100%; flex:0 1 auto; }
+    .editor-preview-frame-sizer.is-resizing .editor-preview-frame { pointer-events:none; }
+    .editor-preview-resize-handle { position:absolute; top:0; bottom:0; width:18px; z-index:2; display:flex; align-items:center; justify-content:center; cursor:ew-resize; border:0; padding:0; background:transparent; color:color-mix(in srgb, var(--muted) 78%, transparent); }
+    .editor-preview-resize-handle::before { content:""; width:3px; height:3rem; border-radius:999px; background:currentColor; opacity:.45; transition:opacity .14s ease, transform .14s ease; }
+    .editor-preview-resize-handle:hover::before,
+    .editor-preview-resize-handle:focus-visible::before,
+    .editor-preview-frame-sizer.is-resizing .editor-preview-resize-handle::before { opacity:.9; transform:scaleX(1.35); }
+    .editor-preview-resize-handle:focus-visible { outline:2px solid color-mix(in srgb, var(--primary) 54%, transparent); outline-offset:-2px; }
+    .editor-preview-resize-handle-left { left:-18px; }
+    .editor-preview-resize-handle-right { right:-18px; }
+    .editor-preview-frame { display:block; width:100%; height:100%; border:0; border-radius:0; background:var(--bg); }
+    @media (prefers-reduced-motion: reduce) {
+      .editor-preview-overlay,
+      .editor-preview-toolbar,
+      .editor-preview-viewport-shell {
+        transition:none !important;
+        transform:none !important;
+        will-change:auto;
+      }
+      .editor-preview-overlay.is-open,
+      .editor-preview-overlay.is-open .editor-preview-toolbar,
+      .editor-preview-overlay.is-open .editor-preview-viewport-shell {
+        opacity:1;
+      }
+    }
     .wrap-toggle .dim { color:#8c959f; }
     /* Editor: reuse SEO hi-editor rules for perfect alignment */
     .hi-editor pre.hi-pre { background-color: transparent; color: var(--code-text); padding: 1rem 1rem 1rem 0.5rem; overflow: hidden; border: 0; border-radius: 8px; line-height: 20px; font-size: 12px; tab-size: 4; position: relative; margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Ubuntu Mono", monospace; font-weight: 400; font-variant-ligatures: none; letter-spacing: 0; }
@@ -1742,8 +1898,9 @@
     .hi-editor .hi-body { position: relative; flex: 1 1 auto; overflow: visible; }
     .hi-editor .hi-pre { position: absolute; inset: 0; margin: 0; white-space: pre; overflow: visible; pointer-events: none; }
     .hi-editor .hi-pre code { white-space: inherit; display: inline-block; min-width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Ubuntu Mono", monospace; font-size: 12px; line-height: 20px; font-weight: 400; font-variant-ligatures: none; font-variant-numeric: tabular-nums; letter-spacing: 0; }
+    .hi-editor .hi-pre code span, .hi-editor .hi-pre code span * { font:inherit; font-weight:inherit; font-style:inherit; font-variant:inherit; font-variant-ligatures:inherit; font-variant-numeric:inherit; letter-spacing:inherit; text-decoration:none; }
     .hi-editor .hi-ta { position: absolute; inset: 0; border: 0; outline: none; resize: none; background: transparent; color: transparent; caret-color: var(--code-text); padding: 1rem 1rem 1rem 0.5rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Ubuntu Mono", monospace; font-size: 12px; line-height: 20px; white-space: pre; overflow: hidden; overscroll-behavior: none; tab-size: 4; font-weight: 400; font-variant-ligatures: none; font-variant-numeric: tabular-nums; letter-spacing: 0; }
-    .hi-editor .hi-ta::selection { background: transparent; color: transparent; }
+    .hi-editor .hi-ta::selection { background: rgba(9,105,218,0.24); color: transparent; -webkit-text-fill-color: transparent; }
     .hi-editor.is-wrap .code-scroll { overflow-x: hidden; }
     .hi-editor.is-wrap .hi-pre,
     .hi-editor.is-wrap .hi-pre code,
@@ -1751,9 +1908,6 @@
     .hi-editor.is-wrap .hi-pre code { min-width: 0; width: 100%; }
     .hi-editor .hi-hl-layer { position: absolute; inset: 0; z-index: 0; }
     .hi-editor .hi-hl-line { position: absolute; left: 0; right: 0; z-index: 0; background: rgba(9,105,218,0.08); border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(9,105,218,0.35); }
-    .hi-editor .hi-selection-range { position: absolute; z-index: 1; background: rgba(9,105,218,0.24); border-radius: 4px; pointer-events: none; }
-    .hi-editor .hi-selection-range.is-joined-prev { border-top-left-radius: 0; border-top-right-radius: 0; }
-    .hi-editor .hi-selection-range.is-joined-next { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
     .hi-editor .code-scroll .code-gutter span.is-active { background: transparent; color: #0f172a; font-weight: 600; }
     .syntax-language-label { position: absolute; top: .5rem; right: .75rem; background: rgba(0,0,0,.6); color: rgba(255,255,255,.9); padding: .25rem .5rem; border-radius: .25rem; font-size: .75rem; font-weight: 500; opacity: .8; border: 1px solid rgba(255,255,255,.1); cursor: pointer; user-select: none; line-height: 1; }
 
@@ -1909,7 +2063,7 @@
     /* Full-screen overlay used while waiting for GitHub sync */
     .sync-overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 1rem; background: color-mix(in srgb, rgba(15,23,42,0.62) 88%, transparent); backdrop-filter: blur(6px); z-index: 14000; }
     .sync-overlay.is-visible { display: flex; }
-    body.ns-sync-overlay-open { overflow: hidden; }
+    body.press-sync-overlay-open { overflow: hidden; }
     .sync-overlay-panel { background: color-mix(in srgb, var(--card) 96%, transparent); border: 1px solid color-mix(in srgb, var(--border) 82%, transparent); border-radius: 16px; padding: 2rem 2.5rem; max-width: min(520px, 100%); box-shadow: 0 24px 64px rgba(15, 23, 42, 0.28); display: flex; flex-direction: column; align-items: center; gap: 1.1rem; text-align: center; position: relative; }
     .sync-overlay-spinner { width: 52px; height: 52px; border-radius: 50%; border: 4px solid color-mix(in srgb, var(--primary) 22%, transparent); border-top-color: var(--primary); animation: sync-overlay-spin .85s linear infinite; }
     .sync-overlay-title { margin: 0; font-size: 1.35rem; font-weight: 700; color: var(--text); }
@@ -2112,15 +2266,14 @@
                 <span class="current-file" id="currentFile" aria-live="polite"></span>
               </div>
               <div class="right-actions">
-                <div class="view-toggle" aria-label="View switch" data-view="edit" data-i18n-aria-label="editor.toolbar.viewAria">
+                <div class="view-toggle" aria-label="View switch" data-view="blocks" data-i18n-aria-label="editor.toolbar.viewAria">
                   <span class="vt-label" data-i18n="editor.toolbar.view">View:</span>
                   <span class="vt-slider" aria-hidden="true"></span>
-                  <a href="#" class="vt-btn active" data-view="edit" aria-label="Editor" data-i18n-aria-label="editor.toolbar.viewEdit"><span class="vt-code-icon" aria-hidden="true">&lt;/&gt;</span><span class="vt-text" data-i18n="editor.toolbar.viewEdit">Editor</span></a>
+                  <a href="#" class="vt-btn active" data-view="blocks" aria-label="Blocks" data-i18n-aria-label="editor.toolbar.viewBlocks"><span class="vt-blocks-icon" aria-hidden="true"><span></span><span></span><span></span><span></span></span><span class="vt-text" data-i18n="editor.toolbar.viewBlocks">Blocks</span></a>
                   <span class="dim" aria-hidden="true">/</span>
-                  <a href="#" class="vt-btn" data-view="blocks" aria-label="Blocks" data-i18n-aria-label="editor.toolbar.viewBlocks"><span class="vt-blocks-icon" aria-hidden="true"><span></span><span></span><span></span><span></span></span><span class="vt-text" data-i18n="editor.toolbar.viewBlocks">Blocks</span></a>
-                  <span class="dim" aria-hidden="true">/</span>
-                  <a href="#" class="vt-btn" data-view="preview" aria-label="Preview" data-i18n-aria-label="editor.toolbar.viewPreview"><svg class="vt-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="3"></circle></svg><span class="vt-text" data-i18n="editor.toolbar.viewPreview">Preview</span></a>
+                  <a href="#" class="vt-btn" data-view="edit" aria-label="Editor" data-i18n-aria-label="editor.toolbar.viewEdit"><span class="vt-code-icon" aria-hidden="true">&lt;/&gt;</span><span class="vt-text" data-i18n="editor.toolbar.viewEdit">Editor</span></a>
                 </div>
+                <button type="button" class="btn-secondary editor-preview-open" id="btnOpenPreview" aria-label="Preview" title="Preview" data-i18n-aria-label="editor.toolbar.viewPreview" data-i18n-title="editor.toolbar.viewPreview"><svg class="vt-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="3"></circle></svg><span class="vt-text" data-i18n="editor.toolbar.viewPreview">Preview</span></button>
                 <button type="button" class="btn-secondary" id="btnSaveMarkdown" disabled>
                   <span class="btn-label" data-i18n="editor.toolbar.save">Save</span>
                 </button>
@@ -2161,15 +2314,11 @@
               </div>
 
               <div id="editor-wrap">
-                <textarea id="mdInput" placeholder="# Hello NanoSite\n\nStart typing Markdown…" aria-label="Markdown source" data-i18n-placeholder="editor.editorPlaceholder" data-i18n-aria-label="editor.editorTextareaAria"></textarea>
+                <textarea id="mdInput" placeholder="# Hello Press\n\nStart typing Markdown…" aria-label="Markdown source" data-i18n-placeholder="editor.editorPlaceholder" data-i18n-aria-label="editor.editorTextareaAria"></textarea>
               </div>
               <div id="blocks-wrap" hidden aria-hidden="true"></div>
             </div>
 
-            <div id="preview-wrap" style="display:none;">
-              <!-- Reuse site post styles by using #mainview as container -->
-              <div id="mainview"></div>
-            </div>
           </div>
           <aside class="editor-workspace-meta" aria-label="Front matter panel">
             <div class="frontmatter-panel" id="frontMatterPanel" data-state="loading">
@@ -2187,11 +2336,53 @@
                     <h3 class="frontmatter-section-title" data-i18n="editor.frontMatter.advancedTitle">Advanced fields</h3>
                     <p class="frontmatter-section-description" data-i18n="editor.frontMatter.advancedDescription">Supplemental metadata for sharing images, version badges, and AI labels.</p>
                   </div>
+                  <div class="frontmatter-grid frontmatter-protection-grid">
+                    <div class="frontmatter-field frontmatter-field-boolean frontmatter-protection-action" data-field-id="article-protection" data-section="advanced">
+                      <div class="frontmatter-field-head">
+                        <div class="frontmatter-field-label-wrap">
+                          <span class="frontmatter-field-title" data-i18n="editor.toolbar.protection">Protection</span>
+                          <span class="frontmatter-help-tooltip-wrap">
+                            <button type="button" class="frontmatter-help-tooltip" aria-label="Protection: Encrypt this article with a per-article password." aria-describedby="frontmatter-help-article-protection">?</button>
+                            <span id="frontmatter-help-article-protection" class="frontmatter-help-tooltip-bubble" role="tooltip">Encrypt this article with a per-article password.</span>
+                          </span>
+                        </div>
+                      </div>
+                      <div class="frontmatter-field-controls">
+                        <label class="frontmatter-switch frontmatter-protection-switch" data-state="off">
+                          <input type="checkbox" class="frontmatter-switch-input" id="btnProtectMarkdown" role="switch" aria-checked="false" disabled>
+                          <span class="frontmatter-switch-track" aria-hidden="true"><span class="frontmatter-switch-thumb"></span></span>
+                          <span class="btn-label" data-i18n="editor.toolbar.protection">Protection</span>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
                   <div class="frontmatter-grid" id="frontMatterExtraFields"></div>
                 </div>
               </div>
             </div>
           </aside>
+        </div>
+        <div id="preview-wrap" class="editor-preview-overlay" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-label="Preview mode" tabindex="-1">
+          <div class="editor-preview-toolbar">
+            <div class="editor-preview-toolbar-main">
+              <span class="editor-preview-mode-label">Preview</span>
+              <span class="editor-preview-path" id="previewPathLabel"></span>
+            </div>
+            <div class="editor-preview-toolbar-actions">
+              <label class="preview-theme-control" id="previewThemeControl">
+                <span class="preview-theme-label">Preview theme</span>
+                <select class="preview-theme-select" id="previewThemeSelect" aria-label="Preview theme"></select>
+              </label>
+              <button type="button" class="btn-secondary editor-preview-close" id="btnClosePreview" aria-label="Close preview" title="Close preview">×</button>
+            </div>
+          </div>
+          <div class="editor-preview-viewport-shell" id="previewViewportShell">
+            <div class="editor-preview-frame-sizer" id="previewFrameSizer">
+              <button type="button" class="editor-preview-resize-handle editor-preview-resize-handle-left" data-preview-resize="left" aria-label="Resize preview viewport from left"></button>
+              <iframe id="previewFrame" class="editor-preview-frame" title="Markdown preview" src="index_editor_preview.html" loading="lazy"></iframe>
+              <button type="button" class="editor-preview-resize-handle editor-preview-resize-handle-right" data-preview-resize="right" aria-label="Resize preview viewport from right"></button>
+            </div>
+          </div>
         </div>
           </section>
           <section class="editor-system-panel" id="editorSystemPanel" hidden aria-hidden="true" aria-live="polite">
@@ -2235,8 +2426,13 @@
               <button class="btn-secondary" id="btnRefresh" title="Fetch latest remote snapshot" data-i18n="editor.composer.refresh" data-i18n-title="editor.composer.refreshTitle">Refresh</button>
               <button class="btn-secondary" id="btnDiscard" title="Discard local draft and reload remote file" data-i18n="editor.composer.discard" data-i18n-title="editor.composer.discardTitle" hidden>Discard</button>
             </div>
+            <div class="editor-modal-header-actions" id="editorModalThemeActions" hidden>
+              <button class="btn-primary" type="button" id="btnThemeImport">Import theme ZIP</button>
+              <input type="file" id="themeImportFileInput" accept=".zip,application/zip,application/x-zip-compressed" hidden>
+            </div>
             <div class="editor-modal-header-actions" id="editorModalUpdateActions" hidden>
-              <button class="btn-primary" type="button" id="btnSystemSelect" data-i18n="editor.systemUpdates.selectArchive">Select downloaded ZIP</button>
+              <button class="btn-primary" type="button" id="btnSystemDownload" data-i18n="editor.systemUpdates.downloadAndCheck">Download and check</button>
+              <button class="btn-secondary" type="button" id="btnSystemSelect" data-i18n="editor.systemUpdates.selectArchive">Select downloaded ZIP</button>
               <input type="file" id="systemUpdateFileInput" accept=".zip,application/zip,application/x-zip-compressed" hidden>
             </div>
             <div class="editor-modal-header-actions" id="editorModalSyncActions" hidden>
@@ -2282,12 +2478,48 @@
           <textarea id="yamlExport" style="width:100%; height: 280px; border:1px solid var(--border); border-radius:8px; background:var(--card); color:var(--text); padding:.6rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Ubuntu Mono', monospace; font-size: 12px; line-height: 18px;"></textarea>
         </div>
     </div>
+    <!-- Theme Manager Mode -->
+    <div class="updates-layout theme-manager-layout editor-overlay-panel" id="mode-themes" hidden aria-hidden="true">
+      <section class="updates-main">
+        <div class="updates-header">
+          <div class="updates-header-text">
+            <div class="theme-manager-tabs" role="tablist" aria-label="Theme manager views">
+              <button class="btn-secondary is-active" type="button" data-theme-manager-view="installed" aria-selected="true">Installed</button>
+              <button class="btn-secondary" type="button" data-theme-manager-view="available" aria-selected="false">Available</button>
+              <button class="btn-secondary" type="button" data-theme-manager-view="import" aria-selected="false">Import ZIP</button>
+            </div>
+          </div>
+          <div class="updates-header-actions">
+            <button class="btn-secondary" type="button" id="btnThemeRefreshCatalog">Refresh catalog</button>
+            <button class="btn-secondary" type="button" id="btnThemeClearStaged">Clear staged</button>
+          </div>
+        </div>
+        <p id="themeManagerStatus" class="updates-status" data-tone="info"></p>
+        <section class="theme-manager-panel" data-theme-manager-panel="installed">
+          <div id="themeManagerInstalledList" class="theme-manager-list"></div>
+        </section>
+        <section class="theme-manager-panel" data-theme-manager-panel="available" hidden aria-hidden="true">
+          <div id="themeManagerAvailableList" class="theme-manager-list"></div>
+        </section>
+        <section class="theme-manager-panel" data-theme-manager-panel="import" hidden aria-hidden="true">
+          <div class="updates-release-notes theme-manager-import">
+            <button class="btn-primary" type="button" id="btnThemeImportInline">Choose ZIP</button>
+          </div>
+        </section>
+        <div id="themeManagerPendingSection" class="updates-files" hidden aria-hidden="true">
+          <h3 class="updates-subtitle">Pending theme files</h3>
+          <ul id="themeManagerFileList" class="updates-file-list"></ul>
+        </div>
+      </section>
+    </div>
     <!-- System Updates Mode -->
     <div class="updates-layout editor-overlay-panel" id="mode-updates" hidden aria-hidden="true">
       <section class="updates-main">
         <div class="updates-header">
           <div class="updates-header-text">
             <div class="updates-meta">
+              <span id="systemUpdateCurrentVersion"></span>
+              <span id="systemUpdateTargetVersion"></span>
               <span id="systemUpdateReleaseMeta"></span>
               <span id="systemUpdateReleasePublished"></span>
               <span id="systemUpdateAssetMeta" class="updates-asset"></span>
@@ -2317,7 +2549,7 @@
   </div>
 
   <footer class="site-footer">
-    <p data-i18n-html="editor.footerNote">Crafted with ❤️ using <a href="https://deemoe404.github.io/NanoSite/" target="_blank" rel="noopener">NanoSite</a>. Stay inspired and keep creating.</p>
+    <p data-i18n-html="editor.footerNote">Crafted with ❤️ using <a href="https://ekilyhq.github.io/Press/" target="_blank" rel="noopener">Press</a>. Stay inspired and keep creating.</p>
   </footer>
   <script>
     (function () {
@@ -2343,7 +2575,7 @@
         toolbarNodes.forEach((toolbar) => ro.observe(toolbar));
       }
 
-      const layouts = ['mode-editor', 'mode-composer', 'mode-updates', 'mode-sync']
+      const layouts = ['mode-editor', 'mode-composer', 'mode-themes', 'mode-updates', 'mode-sync']
         .map((id) => document.getElementById(id))
         .filter(Boolean);
       if (layouts.length) {
@@ -2355,9 +2587,9 @@
       updateOffset();
     })();
   </script>
-  <script type="module" src="assets/js/editor-boot.js?v=welcome-i18n-20260505"></script>
-  <script type="module" src="assets/js/editor-main.js?v=welcome-i18n-20260505"></script>
-  <script type="module" src="assets/js/composer.js?v=welcome-i18n-20260505"></script>
+  <script type="module" src="assets/js/editor-boot.js?v=press-system-v3.4.16"></script>
+  <script type="module" src="assets/js/editor-main.js?v=press-system-v3.4.16"></script>
+  <script type="module" src="assets/js/composer.js?v=press-system-v3.4.16"></script>
   <!-- Back to top button -->
   <button id="backToTop" class="back-to-top" aria-label="返回顶部" title="返回顶部" type="button" hidden>
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

@@ -8,10 +8,24 @@ import {
   resolveSiteRepoConfig,
   parseYAML
 } from './yaml.js';
-import { t, getAvailableLangs, getLanguageLabel } from './i18n.js?v=20260505welcome';
-import { generateSitemapData, resolveSiteBaseUrl } from './seo.js';
-import { initSystemUpdates, getSystemUpdateSummaryEntries, getSystemUpdateCommitFiles, clearSystemUpdateState } from './system-updates.js';
-import { buildEditorContentTree, findEditorContentTreeNode, flattenEditorContentTree } from './editor-content-tree.js?v=20260505welcome';
+import { t, getAvailableLangs, getLanguageLabel } from './i18n.js?v=press-system-v3.4.16';
+import { generateSitemapData, resolveSiteBaseUrl } from './seo.js?v=press-system-v3.4.16';
+import { initSystemUpdates, getSystemUpdateSummaryEntries, getSystemUpdateCommitFiles, clearSystemUpdateState } from './system-updates.js?v=press-system-v3.4.16';
+import { initThemeManager, getThemeManagerSummaryEntries, getThemeManagerCommitFiles, clearThemeManagerState } from './theme-manager.js?v=press-system-v3.4.16';
+import { buildEditorContentTree, findEditorContentTreeNode, flattenEditorContentTree } from './editor-content-tree.js?v=press-system-v3.4.16';
+import { computeReadTime, extractExcerpt, parseFrontMatter } from './content.js';
+import {
+  decryptMarkdownDocument,
+  encryptMarkdownDocument,
+  parseEncryptedMarkdownEnvelope
+} from './encrypted-content.js?v=press-system-v3.4.16';
+import {
+  collectLocalMarkdownAssetReferences,
+  collectManagedMarkdownReferences,
+  listLocalMarkdownAssetReferences,
+  planManagedContentDeletions,
+  resolveLocalMarkdownAssetReference
+} from './repository-deletions.js?v=press-system-v3.4.16';
 
 // Utility helpers
 const $ = (s, r = document) => r.querySelector(s);
@@ -19,7 +33,7 @@ const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
 const PREFERRED_LANG_ORDER = ['en', 'chs', 'cht-tw', 'cht-hk', 'ja'];
 const LANG_CODE_PATTERN = /^[a-z]{2,3}(?:-[a-z0-9]+)*$/i;
-const LANGUAGE_POOL_CHANGED_EVENT = 'ns-composer-language-pool-changed';
+const LANGUAGE_POOL_CHANGED_EVENT = 'press-composer-language-pool-changed';
 
 function broadcastLanguagePoolChange() {
   if (typeof document === 'undefined' || typeof document.dispatchEvent !== 'function') return;
@@ -62,15 +76,76 @@ const getMarkdownSaveTooltip = (kind) => {
   const key = MARKDOWN_SAVE_TOOLTIP_KEYS[kind] || MARKDOWN_SAVE_TOOLTIP_KEYS.default;
   return t(key);
 };
+const getMarkdownProtectionLabel = (tab) => isMarkdownTabProtected(tab)
+  ? t('editor.composer.markdown.protection.labelProtected')
+  : t('editor.composer.markdown.protection.labelUnprotected');
+const getMarkdownProtectionTooltip = (tab) => isMarkdownTabProtected(tab)
+  ? t('editor.composer.markdown.protection.tooltipProtected')
+  : t('editor.composer.markdown.protection.tooltipUnprotected');
 
 // --- Persisted UI state keys ---
 const LS_KEYS = {
-  cfile: 'ns_composer_file',           // 'index' | 'tabs' | 'site'
-  editorState: 'ns_composer_editor_state', // persisted dynamic editor info
-  systemTreeExpanded: 'ns_editor_system_tree_expanded'
+  cfile: 'press_composer_file',           // 'index' | 'tabs' | 'site'
+  editorState: 'press_composer_editor_state', // persisted dynamic editor info
+  systemTreeExpanded: 'press_editor_system_tree_expanded'
 };
 const EDITOR_STATE_VERSION = 3;
 const EDITOR_SCROLL_SAVE_DELAY = 120;
+
+function normalizeStorageScopePart(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return raw.replace(/[^a-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'root';
+}
+
+function resolveEditorStorageScope(locationLike) {
+  let protocol = '';
+  let host = '';
+  let pathname = '';
+  try {
+    if (typeof locationLike === 'string') {
+      const url = new URL(locationLike);
+      protocol = url.protocol;
+      host = url.host;
+      pathname = url.pathname;
+    } else if (locationLike && typeof locationLike === 'object') {
+      if (locationLike.href) {
+        const url = new URL(String(locationLike.href));
+        protocol = url.protocol;
+        host = url.host;
+        pathname = url.pathname;
+      } else {
+        protocol = String(locationLike.protocol || '');
+        host = String(locationLike.host || locationLike.hostname || '');
+        pathname = String(locationLike.pathname || '');
+      }
+    }
+  } catch (_) {
+    return 'unknown';
+  }
+  const path = String(pathname || '');
+  const segments = path.split('/').filter(Boolean);
+  const firstSegment = segments[0] || '';
+  const isRootIndexFile = segments.length === 1
+    && (firstSegment === 'index.html' || firstSegment === 'index_editor.html')
+    && !path.endsWith('/');
+  const sitePath = firstSegment && !isRootIndexFile ? firstSegment : 'root';
+  const protocolPart = protocol ? protocol.replace(/:$/, '') : 'site';
+  return [
+    'v2',
+    normalizeStorageScopePart(protocolPart),
+    normalizeStorageScopePart(host || 'local'),
+    normalizeStorageScopePart(sitePath)
+  ].join(':');
+}
+
+const EDITOR_STORAGE_SCOPE = (() => {
+  try { return resolveEditorStorageScope(window.location); }
+  catch (_) { return 'unknown'; }
+})();
+
+function scopedEditorStorageKey(key) {
+  return `${key}:${EDITOR_STORAGE_SCOPE}`;
+}
 
 // Track additional markdown editor tabs spawned from Composer
 const dynamicEditorTabs = new Map();            // modeId -> { path, button, content, loaded, baseDir }
@@ -87,12 +162,12 @@ let activeEditorTreeNodeId = 'welcome';
 const expandedEditorTreeNodeIds = new Set(['articles', 'pages']);
 let hasEditorStateV3Snapshot = false;
 try {
-  const rawEditorState = window.localStorage.getItem(LS_KEYS.editorState);
+  const rawEditorState = window.localStorage.getItem(scopedEditorStorageKey(LS_KEYS.editorState));
   const parsedEditorState = rawEditorState ? JSON.parse(rawEditorState) : null;
   hasEditorStateV3Snapshot = !!(parsedEditorState && parsedEditorState.v === EDITOR_STATE_VERSION);
 } catch (_) {}
 try {
-  if (!hasEditorStateV3Snapshot && window.localStorage.getItem(LS_KEYS.systemTreeExpanded) === '1') {
+  if (!hasEditorStateV3Snapshot && window.localStorage.getItem(scopedEditorStorageKey(LS_KEYS.systemTreeExpanded)) === '1') {
     expandedEditorTreeNodeIds.add('system');
   }
 } catch (_) {}
@@ -106,7 +181,7 @@ let editorMobileRailBound = false;
 let editorStatePersistTimer = 0;
 let editorStateScrollBound = false;
 let editorContentScrollByKey = {};
-const EDITOR_RAIL_WIDTH_KEY = 'ns_editor_rail_width';
+const EDITOR_RAIL_WIDTH_KEY = 'press_editor_rail_width';
 const EDITOR_RAIL_DEFAULT_WIDTH = 340;
 const EDITOR_RAIL_MIN_WIDTH = 280;
 const EDITOR_RAIL_MAX_WIDTH = 520;
@@ -128,11 +203,12 @@ function updateDynamicTabsGroupState() {
   else container.setAttribute('aria-hidden', 'true');
 }
 
-const DRAFT_STORAGE_KEY = 'ns_composer_drafts_v1';
-const MARKDOWN_DRAFT_STORAGE_KEY = 'ns_markdown_editor_drafts_v1';
+const DRAFT_STORAGE_KEY = 'press_composer_drafts_v1';
+const MARKDOWN_DRAFT_STORAGE_KEY = 'press_markdown_editor_drafts_v1';
 
 // Track pending binary assets associated with markdown drafts
 const markdownAssetStore = new Map();
+const markdownDeletedAssetStore = new Map();
 
 const MARKDOWN_PUSH_LABEL_KEYS = {
   default: 'editor.composer.markdown.push.labelDefault',
@@ -168,13 +244,27 @@ const MARKDOWN_SAVE_TOOLTIP_KEYS = {
   empty: 'editor.composer.markdown.save.tooltips.empty',
   clean: 'editor.composer.markdown.save.tooltips.clean'
 };
-const GITHUB_PAT_STORAGE_KEY = 'ns_fg_pat_cache';
+const GITHUB_PAT_STORAGE_KEY = 'press_fg_pat_cache';
+const CONNECT_PUBLISH_GRANT_STORAGE_KEY = 'press_connect_publish_grant_cache';
+const CONNECT_PUBLISH_ENABLED_STORAGE_KEY = 'press_connect_publish_enabled';
+const CONNECT_PUBLISH_BASE_URL_STORAGE_KEY = 'press_connect_publish_base_url';
+const CONNECT_PUBLISH_MESSAGE_TYPE = 'press-connect-publish-authorized';
+const CONNECT_PUBLISH_PRESETS = [
+  { value: 'https://connect-8mr.pages.dev', label: 'Ekily Connect' },
+  { value: 'http://127.0.0.1:8788', label: 'Local Connect' }
+];
+const ANNOTATE_DISCUSSION_CATEGORY_PRESETS = [
+  { value: 'General', label: 'General' }
+];
 
 let markdownPushButton = null;
 let markdownDiscardButton = null;
 let markdownSaveButton = null;
+let markdownProtectionButton = null;
 let gitHubCommitInFlight = false;
 let cachedFineGrainedTokenMemory = '';
+let cachedConnectPublishGrantMemory = null;
+let cachedConnectPublishSettingsMemory = null;
 
 let activeComposerState = null;
 let remoteBaseline = { index: null, tabs: null, site: null };
@@ -187,6 +277,86 @@ let composerOrderState = null;
 let composerDiffResizeHandler = null;
 let composerOrderPreviewElements = { index: null, tabs: null };
 let composerOrderPreviewState = { index: null, tabs: null };
+
+function createMarkdownProtectionState(overrides = {}) {
+  const source = overrides && typeof overrides === 'object' ? overrides : {};
+  return {
+    enabled: !!source.enabled,
+    password: source.password ? String(source.password) : '',
+    encryptedRemote: !!source.encryptedRemote,
+    encryptedDraft: !!source.encryptedDraft,
+    passwordChanged: !!source.passwordChanged,
+    remoteSignature: source.remoteSignature ? String(source.remoteSignature) : '',
+    remoteCiphertext: source.remoteCiphertext ? String(source.remoteCiphertext) : ''
+  };
+}
+
+function getMarkdownProtectionState(tab) {
+  if (!tab || typeof tab !== 'object') return createMarkdownProtectionState();
+  if (!tab.protection || typeof tab.protection !== 'object') {
+    tab.protection = createMarkdownProtectionState();
+  } else {
+    tab.protection = createMarkdownProtectionState(tab.protection);
+  }
+  return tab.protection;
+}
+
+function setMarkdownProtectionState(tab, state = {}) {
+  if (!tab || typeof tab !== 'object') return createMarkdownProtectionState();
+  tab.protection = createMarkdownProtectionState(state);
+  return tab.protection;
+}
+
+function createDiscardedMarkdownProtectionState(protection) {
+  const current = createMarkdownProtectionState(protection);
+  if (!current.encryptedRemote) return createMarkdownProtectionState();
+  return createMarkdownProtectionState({
+    enabled: true,
+    password: '',
+    encryptedRemote: true,
+    encryptedDraft: false,
+    passwordChanged: false,
+    remoteSignature: current.remoteSignature,
+    remoteCiphertext: current.remoteCiphertext
+  });
+}
+
+function isMarkdownTabProtected(tab) {
+  if (!tab) return false;
+  const protection = getMarkdownProtectionState(tab);
+  return !!protection.enabled;
+}
+
+function isEncryptedMarkdownDraftEntry(entry) {
+  return !!(entry && typeof entry === 'object' && (entry.encrypted === true || entry.protected === true));
+}
+
+function hasMarkdownDraftContent(tab) {
+  if (!tab || !tab.localDraft) return false;
+  const draft = tab.localDraft;
+  const plain = normalizeMarkdownContent(draft.content || '');
+  const encrypted = normalizeMarkdownContent(draft.encryptedContent || '');
+  const deletedAssets = Array.isArray(draft.deletedAssets) && draft.deletedAssets.length;
+  return !!(plain || encrypted || deletedAssets);
+}
+
+function getLockedEncryptedMarkdownDraft(tab) {
+  if (!tab || !tab.localDraft) return '';
+  const draft = tab.localDraft;
+  if (!draft.encrypted || draft.decrypted) return '';
+  return normalizeMarkdownContent(draft.encryptedContent || '');
+}
+
+function getMarkdownDraftSaveGeneration(tab) {
+  return Math.max(0, Math.floor(Number(tab && tab.markdownDraftSaveGeneration) || 0));
+}
+
+function bumpMarkdownDraftSaveGeneration(tab) {
+  if (!tab || typeof tab !== 'object') return 0;
+  const next = getMarkdownDraftSaveGeneration(tab) + 1;
+  tab.markdownDraftSaveGeneration = next;
+  return next;
+}
 let composerOrderPreviewActiveKind = 'index';
 let composerOrderPreviewResizeHandler = null;
 const composerOrderPreviewRelayoutTimers = { index: null, tabs: null };
@@ -204,9 +374,9 @@ let composerSiteScrollCleanup = null;
 function syncSiteEditorSingleLabelWidth(root) {
   if (!root || typeof root.querySelectorAll !== 'function') return;
   try {
-    if (typeof root.__nsSiteSingleLabelWidthCleanup === 'function') root.__nsSiteSingleLabelWidthCleanup();
+    if (typeof root.__pressSiteSingleLabelWidthCleanup === 'function') root.__pressSiteSingleLabelWidthCleanup();
   } catch (_) {}
-  try { root.__nsSiteSingleLabelWidthCleanup = null; } catch (_) {}
+  try { root.__pressSiteSingleLabelWidthCleanup = null; } catch (_) {}
 
   const labels = Array.from(root.querySelectorAll('.cs-single-grid-title'));
   if (!labels.length) {
@@ -281,7 +451,7 @@ function syncSiteEditorSingleLabelWidth(root) {
   } catch (_) {}
   schedule();
 
-  root.__nsSiteSingleLabelWidthCleanup = () => {
+  root.__pressSiteSingleLabelWidthCleanup = () => {
     cancelFrame(frame);
     frame = 0;
     try { if (observer) observer.disconnect(); } catch (_) {}
@@ -294,21 +464,140 @@ function applyComposerEffectiveSiteConfig(siteConfig) {
   const effective = mergeYamlConfig(tracked, composerSiteLocalOverride);
   const root = (effective && effective.contentRoot) ? String(effective.contentRoot) : 'wwwroot';
   try {
-    window.__ns_content_root = root;
+    window.__press_content_root = root;
   } catch (_) {}
   try {
     const repo = (effective && effective.repo) || {};
-    window.__ns_site_repo = {
+    window.__press_site_repo = {
       owner: String(repo.owner || ''),
       name: String(repo.name || ''),
       branch: String(repo.branch || 'main')
     };
   } catch (_) {
     try {
-      window.__ns_site_repo = { owner: '', name: '', branch: 'main' };
+      window.__press_site_repo = { owner: '', name: '', branch: 'main' };
     } catch (_) {}
   }
+  try {
+    window.dispatchEvent(new CustomEvent('press-editor-site-config-change', {
+      detail: { siteConfig: deepClone(effective) }
+    }));
+  } catch (_) {}
   return effective;
+}
+
+function inferRepoConfigFromGitHubPagesUrl(locationLike) {
+  let protocol = '';
+  let hostname = '';
+  let pathname = '';
+
+  try {
+    if (typeof locationLike === 'string') {
+      const url = new URL(locationLike);
+      protocol = url.protocol;
+      hostname = url.hostname;
+      pathname = url.pathname;
+    } else if (locationLike && typeof locationLike === 'object') {
+      if (locationLike.href) {
+        const url = new URL(String(locationLike.href));
+        protocol = url.protocol;
+        hostname = url.hostname;
+        pathname = url.pathname;
+      } else {
+        protocol = String(locationLike.protocol || '');
+        hostname = String(locationLike.hostname || '');
+        pathname = String(locationLike.pathname || '');
+      }
+    }
+  } catch (_) {
+    return null;
+  }
+
+  if (protocol !== 'https:') return null;
+  const host = String(hostname || '').trim().toLowerCase();
+  const suffix = '.github.io';
+  if (!host.endsWith(suffix)) return null;
+  const owner = host.slice(0, -suffix.length);
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(owner)) return null;
+
+  const path = String(pathname || '');
+  const rawSegments = path.split('/').filter(Boolean);
+  const firstSegment = rawSegments[0] || '';
+  const isRootIndexFile = rawSegments.length === 1
+    && (firstSegment === 'index.html' || firstSegment === 'index_editor.html')
+    && !path.endsWith('/');
+  let name = '';
+  if (!firstSegment || isRootIndexFile) {
+    name = `${owner}.github.io`;
+  } else {
+    try {
+      name = decodeURIComponent(firstSegment);
+    } catch (_) {
+      return null;
+    }
+  }
+  if (!/^[A-Za-z0-9_.-]+$/.test(name)) return null;
+
+  return { owner, name, branch: 'main' };
+}
+
+function isPlaceholderRepoConfig(repo) {
+  const source = repo && typeof repo === 'object' ? repo : {};
+  const owner = String(source.owner || '').trim();
+  const name = String(source.name || '').trim();
+  const ownerIsPlaceholder = owner === '' || owner === 'OWNER';
+  const nameIsPlaceholder = name === '' || name === 'REPOSITORY';
+  return ownerIsPlaceholder && nameIsPlaceholder;
+}
+
+function isSameRepoConfig(repo, inferred) {
+  const source = repo && typeof repo === 'object' ? repo : {};
+  const inferredSource = inferred && typeof inferred === 'object' ? inferred : {};
+  const owner = String(source.owner || '').trim().toLowerCase();
+  const name = String(source.name || '').trim().toLowerCase();
+  const inferredOwner = String(inferredSource.owner || '').trim().toLowerCase();
+  const inferredName = String(inferredSource.name || '').trim().toLowerCase();
+  return !!owner && !!name && owner === inferredOwner && name === inferredName;
+}
+
+function shouldAutofillRepoFromPages(site) {
+  const extras = site && site.__extras && typeof site.__extras === 'object' ? site.__extras : {};
+  const value = extras.repoAutofillFromPages;
+  return value === true || String(value || '').trim().toLowerCase() === 'true';
+}
+
+function clearRepoAutofillFromPagesMarker(site) {
+  if (!site.__extras || typeof site.__extras !== 'object') return;
+  if (Object.prototype.hasOwnProperty.call(site.__extras, 'repoAutofillFromPages')) {
+    delete site.__extras.repoAutofillFromPages;
+  }
+}
+
+function applyInferredRepoConfig(site, inferred) {
+  if (!site || typeof site !== 'object') return false;
+  if (!inferred || typeof inferred !== 'object') return false;
+  const owner = String(inferred.owner || '').trim();
+  const name = String(inferred.name || '').trim();
+  const branch = String(inferred.branch || 'main').trim() || 'main';
+  if (!owner || !name) return false;
+
+  const repo = site.repo && typeof site.repo === 'object' ? site.repo : {};
+  const canAutofill = isPlaceholderRepoConfig(repo)
+    || (shouldAutofillRepoFromPages(site) && !isSameRepoConfig(repo, inferred));
+  if (!canAutofill) return false;
+
+  const previousOwner = String(repo.owner || '').trim();
+  const previousName = String(repo.name || '').trim();
+  const previousBranch = String(repo.branch || '').trim();
+  site.repo = repo;
+  repo.owner = owner;
+  repo.name = name;
+  if (!previousBranch) repo.branch = branch;
+  clearRepoAutofillFromPagesMarker(site);
+
+  return previousOwner !== String(repo.owner || '').trim()
+    || previousName !== String(repo.name || '').trim()
+    || previousBranch !== String(repo.branch || '').trim();
 }
 
 async function fetchComposerTrackedSiteConfig() {
@@ -338,6 +627,7 @@ const SITE_FIELD_LABEL_MAP = {
   showAllPosts: { i18nKey: 'editor.composer.site.fields.showAllPosts' },
   landingTab: { i18nKey: 'editor.composer.site.fields.landingTab' },
   repo: { i18nKey: 'editor.composer.site.fields.repo' },
+  annotate: { i18nKey: 'editor.composer.site.sections.comments.title', fallback: 'Comments' },
   assetWarnings: { i18nKey: 'editor.composer.site.sections.assets.title', fallback: 'Asset warnings' },
   __extras: { i18nKey: 'editor.composer.site.fields.extras', fallback: 'Extras' }
 };
@@ -916,6 +1206,72 @@ function safeString(value) {
   return value == null ? '' : String(value);
 }
 
+function isIndexMetadataObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function cloneIndexMetadataValue(value) {
+  if (value == null) return value;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.map(item => cloneIndexMetadataValue(item));
+  if (typeof value === 'object') {
+    const out = {};
+    Object.keys(value).forEach((key) => {
+      const cloned = cloneIndexMetadataValue(value[key]);
+      if (cloned !== undefined) out[key] = cloned;
+    });
+    return out;
+  }
+  return safeString(value);
+}
+
+function normalizeIndexVariantForState(value) {
+  if (!isIndexMetadataObject(value)) return safeString(value);
+  const out = {};
+  const rawLocation = value.location != null ? value.location : value.path;
+  const normalizedLocation = normalizeRelPath(rawLocation);
+  if (normalizedLocation) out.location = normalizedLocation;
+  Object.keys(value).forEach((key) => {
+    if (key === 'location' || key === 'path') return;
+    const cloned = cloneIndexMetadataValue(value[key]);
+    if (cloned !== undefined && cloned !== null && cloned !== '') out[key] = cloned;
+  });
+  return out.location ? out : '';
+}
+
+function getIndexVariantLocation(value) {
+  if (isIndexMetadataObject(value)) return normalizeRelPath(value.location != null ? value.location : value.path);
+  return normalizeRelPath(value);
+}
+
+function stableIndexValue(value) {
+  if (Array.isArray(value)) return value.map(item => stableIndexValue(item));
+  if (value && typeof value === 'object') {
+    const out = {};
+    Object.keys(value).sort().forEach((key) => {
+      out[key] = stableIndexValue(value[key]);
+    });
+    return out;
+  }
+  return value;
+}
+
+function getIndexVariantSignature(value) {
+  const normalized = normalizeIndexVariantForState(value);
+  if (isIndexMetadataObject(normalized)) return JSON.stringify(stableIndexValue(normalized));
+  return safeString(normalized);
+}
+
+function normalizeIndexVariantList(value) {
+  const items = Array.isArray(value) ? value : (value == null || value === '' ? [] : [value]);
+  return items
+    .map(item => normalizeIndexVariantForState(item))
+    .filter(item => {
+      if (isIndexMetadataObject(item)) return !!getIndexVariantLocation(item);
+      return !!normalizeRelPath(item);
+    });
+}
+
 function escapeHtml(value) {
   return safeString(value)
     .replace(/&/g, '&amp;')
@@ -1312,7 +1668,7 @@ function showSyncOverlay(options = {}) {
   }
   setSyncOverlayCancelHandler(null, cancelable);
 
-  try { document.body.classList.add('ns-sync-overlay-open'); }
+  try { document.body.classList.add('press-sync-overlay-open'); }
   catch (_) {}
 
   requestAnimationFrame(() => {
@@ -1335,7 +1691,7 @@ function hideSyncOverlay() {
     els.overlay.hidden = true;
   } catch (_) {}
   setSyncOverlayCancelHandler(null, true);
-  try { document.body.classList.remove('ns-sync-overlay-open'); }
+  try { document.body.classList.remove('press-sync-overlay-open'); }
   catch (_) {}
 }
 
@@ -1423,7 +1779,7 @@ function sleep(ms) {
 
 function getCachedFineGrainedToken() {
   try {
-    const value = sessionStorage.getItem(GITHUB_PAT_STORAGE_KEY);
+    const value = sessionStorage.getItem(scopedEditorStorageKey(GITHUB_PAT_STORAGE_KEY));
     if (typeof value === 'string' && value) {
       cachedFineGrainedTokenMemory = value;
       return value;
@@ -1438,8 +1794,8 @@ function setCachedFineGrainedToken(token) {
   const trimmed = String(token || '').trim();
   cachedFineGrainedTokenMemory = trimmed;
   try {
-    if (trimmed) sessionStorage.setItem(GITHUB_PAT_STORAGE_KEY, trimmed);
-    else sessionStorage.removeItem(GITHUB_PAT_STORAGE_KEY);
+    if (trimmed) sessionStorage.setItem(scopedEditorStorageKey(GITHUB_PAT_STORAGE_KEY), trimmed);
+    else sessionStorage.removeItem(scopedEditorStorageKey(GITHUB_PAT_STORAGE_KEY));
   } catch (_) {
     /* ignore storage errors */
   }
@@ -1447,7 +1803,7 @@ function setCachedFineGrainedToken(token) {
 
 function clearCachedFineGrainedToken() {
   cachedFineGrainedTokenMemory = '';
-  try { sessionStorage.removeItem(GITHUB_PAT_STORAGE_KEY); }
+  try { sessionStorage.removeItem(scopedEditorStorageKey(GITHUB_PAT_STORAGE_KEY)); }
   catch (_) { /* ignore */ }
 }
 
@@ -1455,6 +1811,161 @@ function getFineGrainedTokenValue() {
   const input = document.getElementById('syncGithubTokenInput');
   const value = input && typeof input.value === 'string' ? input.value.trim() : '';
   return value || getCachedFineGrainedToken();
+}
+
+function getDefaultConnectPublishBaseUrl() {
+  return CONNECT_PUBLISH_PRESETS[0].value;
+}
+
+function normalizeConnectPublishBaseUrl(value) {
+  const rawBaseUrl = safeString(value || '').trim();
+  if (!rawBaseUrl) return null;
+  try {
+    const url = new URL(rawBaseUrl);
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLocalhostHost(url.hostname))) return null;
+    return url.origin;
+  } catch (_) {
+    return null;
+  }
+}
+
+function getStoredConnectPublishSettings() {
+  if (cachedConnectPublishSettingsMemory && typeof cachedConnectPublishSettingsMemory === 'object') {
+    return { ...cachedConnectPublishSettingsMemory };
+  }
+  const settings = {
+    enabled: true,
+    baseUrl: getDefaultConnectPublishBaseUrl()
+  };
+  try {
+    const enabledRaw = window.localStorage.getItem(scopedEditorStorageKey(CONNECT_PUBLISH_ENABLED_STORAGE_KEY));
+    if (enabledRaw === '0') settings.enabled = false;
+    else if (enabledRaw === '1') settings.enabled = true;
+    const baseUrlRaw = window.localStorage.getItem(scopedEditorStorageKey(CONNECT_PUBLISH_BASE_URL_STORAGE_KEY));
+    if (typeof baseUrlRaw === 'string' && baseUrlRaw.trim()) settings.baseUrl = baseUrlRaw.trim();
+  } catch (_) {
+    /* ignore unavailable storage */
+  }
+  cachedConnectPublishSettingsMemory = { ...settings };
+  return settings;
+}
+
+function setStoredConnectPublishSettings(next) {
+  const previous = getStoredConnectPublishSettings();
+  const settings = {
+    enabled: typeof next.enabled === 'boolean' ? next.enabled : previous.enabled,
+    baseUrl: safeString(next.baseUrl != null ? next.baseUrl : previous.baseUrl).trim() || getDefaultConnectPublishBaseUrl()
+  };
+  const previousBase = normalizeConnectPublishBaseUrl(previous.baseUrl);
+  const nextBase = normalizeConnectPublishBaseUrl(settings.baseUrl);
+  cachedConnectPublishSettingsMemory = { ...settings };
+  try {
+    window.localStorage.setItem(scopedEditorStorageKey(CONNECT_PUBLISH_ENABLED_STORAGE_KEY), settings.enabled ? '1' : '0');
+    window.localStorage.setItem(scopedEditorStorageKey(CONNECT_PUBLISH_BASE_URL_STORAGE_KEY), settings.baseUrl);
+  } catch (_) {
+    /* ignore storage errors */
+  }
+  if (previousBase !== nextBase) clearCachedConnectPublishGrant();
+  return settings;
+}
+
+function getConnectPublishSettings() {
+  const settings = getStoredConnectPublishSettings();
+  const enabledInput = document.getElementById('syncConnectPublishEnabledInput');
+  if (enabledInput) settings.enabled = !!enabledInput.checked;
+  const baseInput = document.getElementById('syncConnectBaseUrlInput');
+  if (baseInput && typeof baseInput.value === 'string') settings.baseUrl = baseInput.value.trim();
+  return settings;
+}
+
+function setConnectPublishEnabled(enabled) {
+  return setStoredConnectPublishSettings({
+    ...getStoredConnectPublishSettings(),
+    enabled: !!enabled
+  });
+}
+
+function setConnectPublishBaseUrl(baseUrl) {
+  return setStoredConnectPublishSettings({
+    ...getStoredConnectPublishSettings(),
+    baseUrl
+  });
+}
+
+function getConnectPublishConfig() {
+  const settings = getConnectPublishSettings();
+  if (!settings.enabled) return null;
+  const baseUrl = normalizeConnectPublishBaseUrl(settings.baseUrl);
+  return baseUrl ? { baseUrl } : null;
+}
+
+function getCachedConnectPublishGrant() {
+  if (cachedConnectPublishGrantMemory && isUsableConnectPublishGrant(cachedConnectPublishGrantMemory)) {
+    return cachedConnectPublishGrantMemory;
+  }
+  try {
+    const raw = sessionStorage.getItem(scopedEditorStorageKey(CONNECT_PUBLISH_GRANT_STORAGE_KEY));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (isUsableConnectPublishGrant(parsed)) {
+      cachedConnectPublishGrantMemory = parsed;
+      return parsed;
+    }
+  } catch (_) {
+    /* ignore unavailable storage */
+  }
+  return null;
+}
+
+function setCachedConnectPublishGrant(grant) {
+  cachedConnectPublishGrantMemory = grant && typeof grant === 'object' ? { ...grant } : null;
+  try {
+    if (cachedConnectPublishGrantMemory) {
+      sessionStorage.setItem(scopedEditorStorageKey(CONNECT_PUBLISH_GRANT_STORAGE_KEY), JSON.stringify(cachedConnectPublishGrantMemory));
+    } else {
+      sessionStorage.removeItem(scopedEditorStorageKey(CONNECT_PUBLISH_GRANT_STORAGE_KEY));
+    }
+  } catch (_) {
+    /* ignore storage errors */
+  }
+}
+
+function clearCachedConnectPublishGrant() {
+  cachedConnectPublishGrantMemory = null;
+  try { sessionStorage.removeItem(scopedEditorStorageKey(CONNECT_PUBLISH_GRANT_STORAGE_KEY)); }
+  catch (_) { /* ignore */ }
+}
+
+function isUsableConnectPublishGrant(grant) {
+  if (!grant || typeof grant !== 'object' || !grant.token) return false;
+  const expiresAt = Number(grant.expiresAt || 0);
+  return Number.isFinite(expiresAt) && expiresAt > Math.floor(Date.now() / 1000) + 30;
+}
+
+function resolvePublishTransport() {
+  const settings = getConnectPublishSettings();
+  if (settings.enabled) {
+    const baseUrl = normalizeConnectPublishBaseUrl(settings.baseUrl);
+    if (!baseUrl) {
+      return {
+        type: 'connect',
+        invalid: true,
+        rawBaseUrl: settings.baseUrl
+      };
+    }
+    return {
+      type: 'connect',
+      connect: { baseUrl }
+    };
+  }
+  return {
+    type: 'pat'
+  };
+}
+
+function isLocalhostHost(hostname) {
+  const value = String(hostname || '').toLowerCase();
+  return value === 'localhost' || value === '127.0.0.1' || value === '::1' || value === '[::1]';
 }
 
 function renderFineGrainedTokenSettings(host) {
@@ -1522,6 +2033,131 @@ function renderFineGrainedTokenSettings(host) {
 
   host.appendChild(wrapper);
   return { wrapper, input, btnForget };
+}
+
+function renderPublishTransportSettings(host) {
+  if (!host) return null;
+  const settings = getConnectPublishSettings();
+  const wrapper = document.createElement('div');
+  wrapper.className = 'cs-publish-transport-settings';
+
+  const header = document.createElement('div');
+  header.className = 'cs-publish-transport-header';
+  const title = document.createElement('span');
+  title.className = 'cs-publish-transport-title';
+  title.textContent = t('editor.composer.github.modal.connectTitle');
+
+  const method = document.createElement('label');
+  method.className = 'cs-switch cs-publish-method-switch';
+  method.dataset.state = settings.enabled ? 'on' : 'off';
+  const enabledInput = document.createElement('input');
+  enabledInput.type = 'checkbox';
+  enabledInput.id = 'syncConnectPublishEnabledInput';
+  enabledInput.className = 'cs-switch-input';
+  enabledInput.checked = !!settings.enabled;
+  const track = document.createElement('span');
+  track.className = 'cs-switch-track';
+  track.setAttribute('aria-hidden', 'true');
+  const thumb = document.createElement('span');
+  thumb.className = 'cs-switch-thumb';
+  track.appendChild(thumb);
+  const methodText = document.createElement('span');
+  methodText.className = 'cs-switch-label';
+  methodText.textContent = settings.enabled
+    ? t('editor.composer.github.modal.publishMethodConnect')
+    : t('editor.composer.github.modal.publishMethodPat');
+  method.append(enabledInput, track, methodText);
+  header.append(title, method);
+  wrapper.appendChild(header);
+
+  const connectPanel = document.createElement('div');
+  connectPanel.className = 'cs-connect-publish-settings';
+  connectPanel.hidden = !settings.enabled;
+
+  const connectField = document.createElement('label');
+  connectField.className = 'cs-repo-field-group cs-repo-field-group--connect cs-connect-url-field';
+  const connectTitle = document.createElement('span');
+  connectTitle.className = 'cs-repo-field-title';
+  connectTitle.textContent = t('editor.composer.github.modal.connectBaseUrlLabel');
+  const field = document.createElement('div');
+  field.className = 'cs-repo-field cs-repo-field--connect-url';
+  const affix = document.createElement('span');
+  affix.className = 'cs-repo-affix cs-repo-icon-affix';
+  affix.setAttribute('aria-hidden', 'true');
+  affix.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" focusable="false"><path d="M7.75 0a.75.75 0 0 1 .75.75V3h2.75A2.75 2.75 0 0 1 14 5.75v4.5A2.75 2.75 0 0 1 11.25 13H8.5v2.25a.75.75 0 0 1-1.5 0V13H4.75A2.75 2.75 0 0 1 2 10.25v-4.5A2.75 2.75 0 0 1 4.75 3H7V.75A.75.75 0 0 1 7.75 0ZM4.75 4.5c-.69 0-1.25.56-1.25 1.25v4.5c0 .69.56 1.25 1.25 1.25h6.5c.69 0 1.25-.56 1.25-1.25v-4.5c0-.69-.56-1.25-1.25-1.25h-6.5Z"></path></svg>';
+  const input = document.createElement('input');
+  input.id = 'syncConnectBaseUrlInput';
+  input.type = 'url';
+  input.className = 'cs-input cs-repo-input cs-repo-input--connect-url';
+  input.setAttribute('list', 'syncConnectBaseUrlPresets');
+  input.placeholder = getDefaultConnectPublishBaseUrl();
+  input.spellcheck = false;
+  input.autocomplete = 'off';
+  input.value = settings.baseUrl || getDefaultConnectPublishBaseUrl();
+  const presetList = document.createElement('datalist');
+  presetList.id = 'syncConnectBaseUrlPresets';
+  CONNECT_PUBLISH_PRESETS.forEach((preset) => {
+    const option = document.createElement('option');
+    option.value = preset.value;
+    option.label = preset.label;
+    presetList.appendChild(option);
+  });
+  field.append(affix, input);
+  connectField.append(connectTitle, field);
+  connectPanel.append(connectField, presetList);
+
+  const state = document.createElement('p');
+  state.className = 'muted cs-connect-publish-grant';
+  connectPanel.appendChild(state);
+
+  const help = document.createElement('p');
+  help.className = 'muted cs-connect-help';
+  help.textContent = t('editor.composer.github.modal.connectBaseUrlHelp');
+  connectPanel.appendChild(help);
+
+  const patPanel = document.createElement('div');
+  patPanel.className = 'cs-pat-publish-settings';
+  patPanel.hidden = !!settings.enabled;
+  renderFineGrainedTokenSettings(patPanel);
+
+  const updateConnectState = () => {
+    const current = getConnectPublishSettings();
+    const baseUrl = normalizeConnectPublishBaseUrl(current.baseUrl);
+    state.classList.toggle('is-error', current.enabled && !baseUrl);
+    if (!current.enabled) {
+      state.textContent = '';
+    } else if (!baseUrl) {
+      state.textContent = t('editor.composer.github.modal.connectInvalidUrl');
+    } else {
+      const cached = getCachedConnectPublishGrant();
+      state.textContent = cached
+        ? t('editor.composer.github.modal.connectConnected')
+        : t('editor.composer.github.modal.connectHelp', { baseUrl });
+    }
+  };
+
+  input.addEventListener('input', () => {
+    setConnectPublishBaseUrl(input.value);
+    updateConnectState();
+    scheduleSyncCommitPanelRefresh();
+  });
+
+  enabledInput.addEventListener('change', () => {
+    setConnectPublishEnabled(enabledInput.checked);
+    method.dataset.state = enabledInput.checked ? 'on' : 'off';
+    methodText.textContent = enabledInput.checked
+      ? t('editor.composer.github.modal.publishMethodConnect')
+      : t('editor.composer.github.modal.publishMethodPat');
+    connectPanel.hidden = !enabledInput.checked;
+    patPanel.hidden = enabledInput.checked;
+    updateConnectState();
+    scheduleSyncCommitPanelRefresh();
+  });
+
+  updateConnectState();
+  wrapper.append(connectPanel, patPanel);
+  host.appendChild(wrapper);
+  return { wrapper, enabledInput, input };
 }
 
 function startRemoteSyncWatcher(config = {}) {
@@ -1642,12 +2278,29 @@ async function fetchMarkdownRemoteSnapshot(tab) {
   };
 }
 
-function applyMarkdownRemoteSnapshot(tab, snapshot) {
+function applyMarkdownRemoteSnapshot(tab, snapshot, options = {}) {
   if (!tab) return;
   const normalized = normalizeMarkdownContent(snapshot && snapshot.content != null ? snapshot.content : '');
-  tab.remoteContent = normalized;
+  const envelope = parseEncryptedMarkdownEnvelope(normalized);
+  const protectedSnapshot = envelope.encrypted;
+  const remoteBaseline = protectedSnapshot
+    ? normalizeMarkdownContent((options && options.plaintextContent) || tab.content || '')
+    : normalized;
+  tab.remoteContent = remoteBaseline;
   tab.remoteSignature = computeTextSignature(normalized);
   tab.loaded = true;
+  if (protectedSnapshot) {
+    setMarkdownProtectionState(tab, {
+      ...getMarkdownProtectionState(tab),
+      enabled: true,
+      encryptedRemote: true,
+      passwordChanged: false,
+      remoteSignature: tab.remoteSignature,
+      remoteCiphertext: envelope.ciphertext || ''
+    });
+  } else if (!isMarkdownTabProtected(tab)) {
+    setMarkdownProtectionState(tab, createMarkdownProtectionState());
+  }
 
   const stateLabel = snapshot && snapshot.state === 'missing' ? 'missing' : 'existing';
   const statusCode = snapshot && snapshot.status;
@@ -1662,15 +2315,15 @@ function applyMarkdownRemoteSnapshot(tab, snapshot) {
     message: statusMessage
   });
 
-  if (!tab.localDraft || !tab.localDraft.content) {
+  if (!hasMarkdownDraftContent(tab)) {
     const currentNormalized = normalizeMarkdownContent(tab.content || '');
     tab.content = currentNormalized;
-    if (currentNormalized !== normalized) {
-      tab.content = normalized;
+    if (currentNormalized !== remoteBaseline) {
+      tab.content = remoteBaseline;
       if (currentMode === tab.mode) {
         const editorApi = getPrimaryEditorApi();
         if (editorApi && typeof editorApi.setValue === 'function') {
-          try { editorApi.setValue(normalized, { notify: false }); } catch (_) {}
+          try { editorApi.setValue(remoteBaseline, { notify: false }); } catch (_) {}
         }
       }
     }
@@ -1742,7 +2395,9 @@ function startMarkdownSyncWatcher(tab, options = {}) {
     },
     onSuccess: (result) => {
       if (result && result.data) {
-        applyMarkdownRemoteSnapshot(tab, result.data);
+        applyMarkdownRemoteSnapshot(tab, result.data, {
+          plaintextContent: options.plaintextContent || ''
+        });
         if (result.mismatch) {
           showToast('warn', t('editor.toasts.remoteMarkdownMismatch'), { duration: 4200 });
         } else {
@@ -1752,6 +2407,7 @@ function startMarkdownSyncWatcher(tab, options = {}) {
       updateMarkdownPushButton(tab);
       updateMarkdownDiscardButton(tab);
       updateMarkdownSaveButton(tab);
+      updateMarkdownProtectionButton(tab);
     },
     onCancel: () => {
       const fallbackStatus = (previousStatus && previousStatus.state)
@@ -1765,6 +2421,7 @@ function startMarkdownSyncWatcher(tab, options = {}) {
       updateMarkdownPushButton(tab);
       updateMarkdownDiscardButton(tab);
       updateMarkdownSaveButton(tab);
+      updateMarkdownProtectionButton(tab);
       showToast('info', t('editor.toasts.remoteCheckCanceledUseRefresh'));
     }
   });
@@ -1946,10 +2603,9 @@ function normalizeIndexEntry(entry) {
     if (lang === '__order') return;
     const value = entry[lang];
     if (Array.isArray(value)) {
-      out[lang] = value.map(item => safeString(item));
+      out[lang] = normalizeIndexVariantList(value);
     } else if (value != null && typeof value === 'object') {
-      // Unexpected object -> stringify to keep placeholder
-      out[lang] = safeString(value.location || value.path || '');
+      out[lang] = normalizeIndexVariantForState(value);
     } else {
       out[lang] = safeString(value);
     }
@@ -2081,6 +2737,12 @@ function prepareSiteState(raw) {
     name: safeString(repo.name || ''),
     branch: safeString(repo.branch || '')
   };
+  const annotate = (src.annotate && typeof src.annotate === 'object') ? src.annotate : {};
+  site.annotate = {
+    enabled: normalizeBoolean(annotate.enabled),
+    connectBaseUrl: safeString(annotate.connectBaseUrl || ''),
+    discussionCategory: safeString(annotate.discussionCategory || '')
+  };
   const assetWarnings = (src.assetWarnings && typeof src.assetWarnings === 'object') ? src.assetWarnings : {};
   const largeImage = (assetWarnings.largeImage && typeof assetWarnings.largeImage === 'object') ? assetWarnings.largeImage : {};
   site.assetWarnings = {
@@ -2093,8 +2755,8 @@ function prepareSiteState(raw) {
   const recognized = new Set([
     'siteTitle', 'siteSubtitle', 'siteDescription', 'siteKeywords', 'avatar', 'resourceURL', 'contentRoot',
     'profileLinks', 'contentOutdatedDays', 'cardCoverFallback', 'errorOverlay', 'pageSize', 'postsPerPage',
-    'defaultLanguage', 'themeMode', 'themePack', 'themeOverride', 'repo', 'assetWarnings', 'landingTab', 'showAllPosts',
-    'enableAllPosts', 'disableAllPosts'
+    'defaultLanguage', 'themeMode', 'themePack', 'themeOverride', 'repo', 'annotate', 'assetWarnings', 'landingTab', 'showAllPosts',
+    'enableAllPosts', 'disableAllPosts', 'connect'
   ]);
   const deprecated = new Set(['links']);
 
@@ -2131,6 +2793,7 @@ function cloneSiteState(state) {
     showAllPosts: normalizeBoolean(state.showAllPosts),
     landingTab: safeString(state.landingTab || ''),
     repo: deepClone(state.repo || { owner: '', name: '', branch: '' }),
+    annotate: deepClone(state.annotate || { enabled: null, connectBaseUrl: '', discussionCategory: '' }),
     assetWarnings: deepClone(state.assetWarnings || { largeImage: { enabled: null, thresholdKB: null } }),
     __extras: deepClone(state.__extras || {})
   };
@@ -2201,6 +2864,19 @@ function repoForOutput(repo) {
   return Object.keys(out).length ? out : null;
 }
 
+function annotateForOutput(annotate) {
+  if (!annotate || typeof annotate !== 'object') return null;
+  const enabled = normalizeBoolean(annotate.enabled);
+  const connectBaseUrl = safeString(annotate.connectBaseUrl || '').trim();
+  const discussionCategory = safeString(annotate.discussionCategory || '').trim();
+  if (enabled == null && !connectBaseUrl && !discussionCategory) return null;
+  const out = {};
+  if (enabled != null) out.enabled = enabled;
+  if (connectBaseUrl) out.connectBaseUrl = connectBaseUrl;
+  if (discussionCategory) out.discussionCategory = discussionCategory;
+  return Object.keys(out).length ? out : null;
+}
+
 function buildSiteSnapshot(state) {
   const site = cloneSiteState(state);
   const snapshot = {};
@@ -2232,6 +2908,8 @@ function buildSiteSnapshot(state) {
   if (site.landingTab) snapshot.landingTab = site.landingTab;
   const repo = repoForOutput(site.repo);
   if (repo) snapshot.repo = repo;
+  const annotate = annotateForOutput(site.annotate);
+  if (annotate) snapshot.annotate = annotate;
   const warnings = assetWarningsForOutput(site.assetWarnings);
   if (warnings) snapshot.assetWarnings = warnings;
 
@@ -2348,6 +3026,17 @@ function computeSiteDiff(current, baseline) {
     diff.hasChanges = true;
   }
 
+  const annotateCur = cur.annotate || {};
+  const annotateBase = base.annotate || {};
+  const annotateFields = {};
+  if (normalizeBoolean(annotateCur.enabled) !== normalizeBoolean(annotateBase.enabled)) annotateFields.enabled = true;
+  if (safeString(annotateCur.connectBaseUrl) !== safeString(annotateBase.connectBaseUrl)) annotateFields.connectBaseUrl = true;
+  if (safeString(annotateCur.discussionCategory) !== safeString(annotateBase.discussionCategory)) annotateFields.discussionCategory = true;
+  if (Object.keys(annotateFields).length) {
+    diff.fields.annotate = { type: 'object', fields: annotateFields };
+    diff.hasChanges = true;
+  }
+
   const curWarn = (cur.assetWarnings && cur.assetWarnings.largeImage) || {};
   const baseWarn = (base.assetWarnings && base.assetWarnings.largeImage) || {};
   const warningFields = {};
@@ -2410,7 +3099,7 @@ function applySiteDiffMarkers(diff) {
     else el.removeAttribute('data-diff');
   });
   try {
-    if (typeof root.__nsSiteNavRefresh === 'function') root.__nsSiteNavRefresh();
+    if (typeof root.__pressSiteNavRefresh === 'function') root.__pressSiteNavRefresh();
   } catch (_) {}
 }
 
@@ -2445,8 +3134,7 @@ function writeYamlValue(lines, indent, value) {
       if (item == null || typeof item !== 'object' || Array.isArray(item)) {
         lines.push(`${pad}- ${yamlScalar(item)}`);
       } else {
-        lines.push(`${pad}-`);
-        writeYamlObject(lines, indent + 1, item);
+        writeYamlArrayObject(lines, indent, item);
       }
     });
     return;
@@ -2456,6 +3144,33 @@ function writeYamlValue(lines, indent, value) {
     return;
   }
   lines.push(`${pad}${yamlScalar(String(value))}`);
+}
+
+function writeYamlArrayObject(lines, indent, obj) {
+  const pad = '  '.repeat(indent);
+  const keys = Object.keys(obj);
+  if (!keys.length) {
+    lines.push(`${pad}- {}`);
+    return;
+  }
+  const [firstKey, ...restKeys] = keys;
+  const firstValue = obj[firstKey];
+  if (firstValue == null || typeof firstValue === 'string' || typeof firstValue === 'number' || typeof firstValue === 'boolean') {
+    lines.push(`${pad}- ${firstKey}: ${yamlScalar(firstValue)}`);
+  } else {
+    lines.push(`${pad}- ${firstKey}:`);
+    writeYamlValue(lines, indent + 2, firstValue);
+  }
+  restKeys.forEach((key) => {
+    const value = obj[key];
+    const childPad = '  '.repeat(indent + 1);
+    if (value == null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      lines.push(`${childPad}${key}: ${yamlScalar(value)}`);
+    } else {
+      lines.push(`${childPad}${key}:`);
+      writeYamlValue(lines, indent + 2, value);
+    }
+  });
 }
 
 function writeYamlObject(lines, indent, obj) {
@@ -2481,7 +3196,7 @@ function toSiteYaml(data) {
   const keysInOrder = [
     'siteTitle', 'siteSubtitle', 'siteDescription', 'siteKeywords', 'avatar', 'profileLinks', 'resourceURL',
     'contentRoot', 'contentOutdatedDays', 'cardCoverFallback', 'errorOverlay', 'pageSize', 'defaultLanguage',
-    'themeMode', 'themePack', 'themeOverride', 'showAllPosts', 'landingTab', 'repo', 'assetWarnings'
+    'themeMode', 'themePack', 'themeOverride', 'showAllPosts', 'landingTab', 'repo', 'annotate', 'connect', 'assetWarnings'
   ];
   const ordered = {};
   keysInOrder.forEach((key) => {
@@ -2529,8 +3244,8 @@ function computeIndexSignature(state) {
     const langs = Object.keys(entry).sort();
     const langParts = langs.map(lang => {
       const value = entry[lang];
-      if (Array.isArray(value)) return [lang, 'list', value.map(item => safeString(item))];
-      return [lang, 'single', safeString(value)];
+      if (Array.isArray(value)) return [lang, 'list', value.map(item => getIndexVariantSignature(item))];
+      return [lang, 'single', getIndexVariantSignature(value)];
     });
     parts.push(JSON.stringify([key, langParts]));
   });
@@ -2558,7 +3273,11 @@ function computeTabsSignature(state) {
 function diffVersionLists(currentValue, baselineValue) {
   const normalize = (value) => {
     if (Array.isArray(value)) {
-      const items = value.map(item => safeString(item));
+      const items = value.map(item => ({
+        path: getIndexVariantLocation(item),
+        signature: getIndexVariantSignature(item),
+        restoreValue: cloneIndexMetadataValue(item)
+      }));
       if (items.length === 0) {
         return { kind: 'list', items: [] };
       }
@@ -2567,7 +3286,14 @@ function diffVersionLists(currentValue, baselineValue) {
       }
       return { kind: 'list', items };
     }
-    return { kind: 'single', items: [safeString(value)] };
+    return {
+      kind: 'single',
+      items: [{
+        path: getIndexVariantLocation(value),
+        signature: getIndexVariantSignature(value),
+        restoreValue: cloneIndexMetadataValue(value)
+      }]
+    };
   };
   const cur = normalize(currentValue);
   const base = normalize(baselineValue);
@@ -2579,14 +3305,14 @@ function diffVersionLists(currentValue, baselineValue) {
     const value = curItems[i];
     let status = 'added';
     let prevIndex = -1;
-    if (i < baseItems.length && baseItems[i] === value && !baseMatched[i]) {
+    if (i < baseItems.length && baseItems[i].signature === value.signature && !baseMatched[i]) {
       status = 'unchanged';
       prevIndex = i;
       baseMatched[i] = true;
     } else {
       let foundIndex = -1;
       for (let j = 0; j < baseItems.length; j += 1) {
-        if (!baseMatched[j] && baseItems[j] === value) {
+        if (!baseMatched[j] && baseItems[j].signature === value.signature) {
           foundIndex = j;
           break;
         }
@@ -2601,18 +3327,24 @@ function diffVersionLists(currentValue, baselineValue) {
         baseMatched[i] = true;
       }
     }
-    entries.push({ value, status, prevIndex });
+    entries.push({ value: value.path || '', status, prevIndex });
   }
   const removed = [];
   for (let i = 0; i < baseItems.length; i += 1) {
-    if (!baseMatched[i]) removed.push({ value: baseItems[i], index: i });
+    if (!baseMatched[i]) {
+      removed.push({
+        value: baseItems[i].path || '',
+        restoreValue: baseItems[i].restoreValue,
+        index: i
+      });
+    }
   }
   const changed = cur.kind !== base.kind
     || curItems.length !== baseItems.length
     || entries.some(item => item.status !== 'unchanged')
     || removed.length > 0;
   const orderChanged = entries.some(item => item.status === 'moved')
-    || (curItems.length === baseItems.length && !arraysEqual(curItems, baseItems));
+    || (curItems.length === baseItems.length && !arraysEqual(curItems.map(item => item.path), baseItems.map(item => item.path)));
   return {
     entries,
     removed,
@@ -2768,7 +3500,7 @@ function computeTabsDiff(current, baseline) {
 
 function readDraftStore() {
   try {
-    const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+    const raw = localStorage.getItem(scopedEditorStorageKey(DRAFT_STORAGE_KEY));
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? parsed : {};
@@ -2780,10 +3512,10 @@ function readDraftStore() {
 function writeDraftStore(store) {
   try {
     if (!store || !Object.keys(store).length) {
-      localStorage.removeItem(DRAFT_STORAGE_KEY);
+      localStorage.removeItem(scopedEditorStorageKey(DRAFT_STORAGE_KEY));
       return;
     }
-    localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(store));
+    localStorage.setItem(scopedEditorStorageKey(DRAFT_STORAGE_KEY), JSON.stringify(store));
   } catch (_) {
     /* ignore storage errors */
   }
@@ -2832,7 +3564,7 @@ function broadcastMarkdownAssetPreview(path) {
     }))
     : [];
   try {
-    window.dispatchEvent(new CustomEvent('ns-editor-asset-preview', {
+    window.dispatchEvent(new CustomEvent('press-editor-asset-preview', {
       detail: { markdownPath: norm, assets }
     }));
   } catch (_) {
@@ -2867,6 +3599,37 @@ function normalizeAssetDescriptor(asset, markdownPath) {
   };
 }
 
+function normalizeAssetDeletionDescriptor(asset, markdownPath) {
+  if (!asset) return null;
+  const markdown = normalizeRelPath(markdownPath || asset.markdownPath || '');
+  if (!markdown) return null;
+  const assetPath = normalizeRelPath(asset.assetPath || asset.path || asset.commitPath || '');
+  let relativePath = asset.assetRelativePath || asset.relativePath
+    ? String(asset.assetRelativePath || asset.relativePath).replace(/[\\]/g, '/')
+    : '';
+  if (!relativePath && assetPath) {
+    const idx = markdown.lastIndexOf('/');
+    const dir = idx >= 0 ? markdown.slice(0, idx) : '';
+    const prefix = dir ? `${dir}/assets/` : 'assets/';
+    if (!assetPath.startsWith(prefix)) return null;
+    relativePath = dir ? assetPath.slice(dir.length + 1) : assetPath;
+  }
+  const resolved = resolveLocalMarkdownAssetReference(markdown, relativePath, getContentRootSafe());
+  if (!resolved) return null;
+  if (assetPath && assetPath !== resolved.contentPath) return null;
+  return {
+    kind: 'asset',
+    category: 'content-asset',
+    label: resolved.relativePath || asset.label || resolved.contentPath,
+    path: resolved.contentPath,
+    markdownPath: markdown,
+    assetPath: resolved.contentPath,
+    assetRelativePath: resolved.relativePath || '',
+    state: 'deleted',
+    deleted: true
+  };
+}
+
 function importMarkdownAssetsForPath(path, assets = []) {
   const bucket = ensureMarkdownAssetBucket(path);
   if (!bucket) return null;
@@ -2896,6 +3659,31 @@ function exportMarkdownAssetBucket(path) {
   }));
 }
 
+function importMarkdownAssetDeletionsForPath(path, deletedAssets = []) {
+  const bucket = ensureMarkdownDeletedAssetBucket(path);
+  if (!bucket) return null;
+  bucket.clear();
+  if (Array.isArray(deletedAssets)) {
+    deletedAssets.forEach((entry) => {
+      const normalized = normalizeAssetDeletionDescriptor(entry, path);
+      if (normalized) bucket.set(normalized.assetPath, normalized);
+    });
+  }
+  return bucket;
+}
+
+function exportMarkdownAssetDeletionBucket(path) {
+  const bucket = markdownDeletedAssetStore.get(normalizeRelPath(path));
+  if (!bucket || !bucket.size) return [];
+  return Array.from(bucket.values()).map((asset) => ({
+    path: asset.assetPath || asset.path,
+    relativePath: asset.assetRelativePath || '',
+    label: asset.label || asset.assetPath || asset.path,
+    state: 'deleted',
+    deleted: true
+  }));
+}
+
 function updateMarkdownDraftStoreAssets(path, assets = []) {
   const norm = normalizeRelPath(path);
   if (!norm) return;
@@ -2909,12 +3697,35 @@ function updateMarkdownDraftStoreAssets(path, assets = []) {
   writeMarkdownDraftStore(store);
 }
 
+function updateMarkdownDraftStoreAssetDeletions(path, deletedAssets = []) {
+  const norm = normalizeRelPath(path);
+  if (!norm) return;
+  const store = readMarkdownDraftStore();
+  const entry = (store[norm] && typeof store[norm] === 'object') ? store[norm] : {};
+  const list = Array.isArray(deletedAssets)
+    ? deletedAssets.map(item => normalizeAssetDeletionDescriptor(item, norm)).filter(Boolean)
+    : [];
+  if (list.length) {
+    entry.deletedAssets = list;
+    if (!entry.savedAt) entry.savedAt = Date.now();
+  } else {
+    delete entry.deletedAssets;
+  }
+  const hasContent = entry.content != null && normalizeMarkdownContent(entry.content);
+  const hasAssets = Array.isArray(entry.assets) && entry.assets.length;
+  const hasDeletedAssets = Array.isArray(entry.deletedAssets) && entry.deletedAssets.length;
+  if (!hasContent && !hasAssets && !hasDeletedAssets) delete store[norm];
+  else store[norm] = entry;
+  writeMarkdownDraftStore(store);
+}
+
 function clearMarkdownAssetsForPath(path) {
   const norm = normalizeRelPath(path);
   if (!norm) return;
   const bucket = markdownAssetStore.get(norm);
   if (bucket) bucket.clear();
   markdownAssetStore.delete(norm);
+  clearMarkdownAssetDeletionsForPath(norm);
   updateMarkdownDraftStoreAssets(norm, []);
   broadcastMarkdownAssetPreview(norm);
 }
@@ -2929,6 +3740,86 @@ function removeMarkdownAsset(path, assetPath) {
   if (!bucket.size) markdownAssetStore.delete(norm);
   updateMarkdownDraftStoreAssets(norm, exportMarkdownAssetBucket(norm));
   broadcastMarkdownAssetPreview(norm);
+}
+
+function ensureMarkdownDeletedAssetBucket(path) {
+  const norm = normalizeRelPath(path);
+  if (!norm) return null;
+  let bucket = markdownDeletedAssetStore.get(norm);
+  if (!bucket) {
+    bucket = new Map();
+    markdownDeletedAssetStore.set(norm, bucket);
+  }
+  return bucket;
+}
+
+function clearMarkdownAssetDeletionsForPath(path) {
+  const norm = normalizeRelPath(path);
+  if (!norm) return;
+  const bucket = markdownDeletedAssetStore.get(norm);
+  if (bucket) bucket.clear();
+  markdownDeletedAssetStore.delete(norm);
+  updateMarkdownDraftStoreAssetDeletions(norm, []);
+}
+
+function removeMarkdownAssetDeletion(path, assetPath) {
+  const norm = normalizeRelPath(path);
+  const assetKey = normalizeRelPath(assetPath);
+  if (!norm || !assetKey) return;
+  const bucket = markdownDeletedAssetStore.get(norm);
+  if (!bucket || !bucket.has(assetKey)) return;
+  bucket.delete(assetKey);
+  if (!bucket.size) markdownDeletedAssetStore.delete(norm);
+  updateMarkdownDraftStoreAssetDeletions(norm, exportMarkdownAssetDeletionBucket(norm));
+}
+
+function stageMarkdownAssetDeletion(path, resolved) {
+  const norm = normalizeRelPath(path);
+  const assetPath = normalizeRelPath(resolved && resolved.contentPath);
+  if (!norm || !assetPath) return null;
+  const pendingBucket = getMarkdownAssetBucket(norm);
+  if (pendingBucket && pendingBucket.has(assetPath)) {
+    removeMarkdownAsset(norm, assetPath);
+    removeMarkdownAssetDeletion(norm, assetPath);
+    updateMarkdownDraftStoreAssetDeletions(norm, exportMarkdownAssetDeletionBucket(norm));
+    return { pendingOnly: true, assetPath };
+  }
+  const bucket = ensureMarkdownDeletedAssetBucket(norm);
+  if (!bucket) return null;
+  const entry = {
+    kind: 'asset',
+    category: 'content-asset',
+    label: (resolved && resolved.relativePath) || assetPath,
+    path: assetPath,
+    markdownPath: norm,
+    assetPath,
+    assetRelativePath: (resolved && resolved.relativePath) || '',
+    state: 'deleted',
+    deleted: true
+  };
+  bucket.set(assetPath, entry);
+  updateMarkdownDraftStoreAssetDeletions(norm, exportMarkdownAssetDeletionBucket(norm));
+  return entry;
+}
+
+function listMarkdownAssetDeletions(path = '') {
+  const norm = normalizeRelPath(path);
+  const buckets = norm
+    ? [[norm, markdownDeletedAssetStore.get(norm)]]
+    : Array.from(markdownDeletedAssetStore.entries());
+  const out = [];
+  buckets.forEach(([, bucket]) => {
+    if (!bucket || !bucket.size) return;
+    bucket.forEach((entry) => {
+      if (entry && entry.path && entry.deleted) out.push(entry);
+    });
+  });
+  out.sort((a, b) => String(a.path || '').localeCompare(String(b.path || '')));
+  return out;
+}
+
+function countMarkdownAssetDeletions(path) {
+  return listMarkdownAssetDeletions(path).length;
 }
 
 function listMarkdownAssets(path) {
@@ -2953,6 +3844,173 @@ function isAssetReferencedInContent(content, asset) {
   if (text.includes(rel)) return true;
   if (!rel.startsWith('./') && text.includes(`./${rel}`)) return true;
   return false;
+}
+
+function textWithFallback(key, fallback, params) {
+  try {
+    const translated = t(key, params);
+    if (translated && translated !== key) return translated;
+  } catch (_) {}
+  return fallback;
+}
+
+function knownMarkdownTextForAssetScan(tab, activeTab, activeValue) {
+  if (!tab) return '';
+  if (tab === activeTab && activeValue != null) return normalizeMarkdownContent(activeValue);
+  if (tab.content != null && tab.content !== undefined) return normalizeMarkdownContent(tab.content);
+  if (tab.localDraft && tab.localDraft.content != null) return normalizeMarkdownContent(tab.localDraft.content);
+  return '';
+}
+
+function draftHasAssetDeletions(draft) {
+  return !!(draft && Array.isArray(draft.deletedAssets) && draft.deletedAssets.length);
+}
+
+function countKnownMarkdownAssetReferences(assetPath, ownerPath) {
+  const normalizedAsset = normalizeRelPath(assetPath);
+  const owner = normalizeRelPath(ownerPath);
+  const contentRoot = getContentRootSafe();
+  const counts = { owner: 0, others: 0 };
+  if (!normalizedAsset) return counts;
+  const seen = new Set();
+  let activeTab = null;
+  let activeValue = null;
+  try {
+    activeTab = getActiveDynamicTab();
+    const editorApi = getPrimaryEditorApi();
+    if (activeTab && editorApi && typeof editorApi.getValue === 'function') {
+      activeValue = String(editorApi.getValue() || '');
+    }
+  } catch (_) {}
+  dynamicEditorTabs.forEach((tab) => {
+    const path = normalizeRelPath(tab && tab.path);
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    const content = knownMarkdownTextForAssetScan(tab, activeTab, activeValue);
+    if (!content) return;
+    const refs = listLocalMarkdownAssetReferences(content, path, contentRoot)
+      .filter(ref => ref && ref.contentPath === normalizedAsset);
+    if (!refs.length) return;
+    if (path === owner) counts.owner += refs.length;
+    else counts.others += refs.length;
+  });
+  const store = readMarkdownDraftStore();
+  if (store && typeof store === 'object') {
+    Object.keys(store).forEach((key) => {
+      const path = normalizeRelPath(key);
+      if (!path || seen.has(path)) return;
+      const entry = store[key];
+      if (!entry || typeof entry !== 'object') return;
+      const content = entry.content != null ? normalizeMarkdownContent(entry.content) : '';
+      if (!content && !draftHasAssetDeletions(entry)) return;
+      seen.add(path);
+      if (!content) return;
+      const refs = listLocalMarkdownAssetReferences(content, path, contentRoot)
+        .filter(ref => ref && ref.contentPath === normalizedAsset);
+      if (!refs.length) return;
+      if (path === owner) counts.owner += refs.length;
+      else counts.others += refs.length;
+    });
+  }
+  return counts;
+}
+
+function collectKnownCurrentMarkdownAssetReferenceData(options = {}) {
+  const refs = new Set();
+  const contentRoot = getContentRootSafe();
+  const excluded = new Set((Array.isArray(options.excludeMarkdownPaths) ? options.excludeMarkdownPaths : [])
+    .map(path => normalizeRelPath(path))
+    .filter(Boolean));
+  const seen = new Set();
+  let activeTab = null;
+  let activeValue = null;
+  try {
+    activeTab = getActiveDynamicTab();
+    const editorApi = getPrimaryEditorApi();
+    if (activeTab && editorApi && typeof editorApi.getValue === 'function') {
+      activeValue = String(editorApi.getValue() || '');
+    }
+  } catch (_) {}
+  dynamicEditorTabs.forEach((tab) => {
+    const path = normalizeRelPath(tab && tab.path);
+    if (!path || excluded.has(path) || seen.has(path)) return;
+    const content = knownMarkdownTextForAssetScan(tab, activeTab, activeValue);
+    const deletionOnlyDraft = !content && tab && tab.localDraft && draftHasAssetDeletions(tab.localDraft);
+    if (!content && !deletionOnlyDraft) return;
+    seen.add(path);
+    if (content) collectLocalMarkdownAssetReferences(content, path, contentRoot).forEach(ref => refs.add(ref));
+  });
+  const store = readMarkdownDraftStore();
+  if (store && typeof store === 'object') {
+    Object.keys(store).forEach((key) => {
+      const path = normalizeRelPath(key);
+      if (!path || excluded.has(path) || seen.has(path)) return;
+      const entry = store[key];
+      if (!entry || typeof entry !== 'object') return;
+      const content = entry.content != null ? normalizeMarkdownContent(entry.content) : '';
+      if (!content && !draftHasAssetDeletions(entry)) return;
+      seen.add(path);
+      if (!content) return;
+      collectLocalMarkdownAssetReferences(content, path, contentRoot).forEach(ref => refs.add(ref));
+    });
+  }
+  return { refs, seen };
+}
+
+function collectKnownCurrentMarkdownAssetReferences(options = {}) {
+  return collectKnownCurrentMarkdownAssetReferenceData(options).refs;
+}
+
+function currentManagedMarkdownPathsForAssetScan(contentRoot = 'wwwroot') {
+  const refs = collectManagedMarkdownReferences({
+    index: getStateSlice('index') || { __order: [] },
+    tabs: getStateSlice('tabs') || { __order: [] },
+    contentRoot
+  });
+  return Array.from(refs).sort((a, b) => a.localeCompare(b));
+}
+
+async function fetchMarkdownForAssetScan(contentPath, contentRoot = 'wwwroot') {
+  const rel = normalizeRelPath(contentPath);
+  if (!rel) return { text: '', failed: true };
+  const root = String(contentRoot || '').replace(/[\\]/g, '/').replace(/^\/+|\/+$/g, '') || 'wwwroot';
+  const path = `${root}/${rel}`.replace(/\/+/g, '/');
+  try {
+    const resp = await fetch(`${path}?ts=${Date.now()}`, { cache: 'no-store' });
+    if (!resp.ok) return { text: '', failed: true };
+    return { text: normalizeMarkdownContent(await resp.text()), failed: false };
+  } catch (_) {
+    return { text: '', failed: true };
+  }
+}
+
+async function collectCurrentRepositoryMarkdownAssetReferences(options = {}) {
+  const currentRoot = options.currentContentRoot || getContentRootSafe();
+  const excluded = new Set((Array.isArray(options.excludeMarkdownPaths) ? options.excludeMarkdownPaths : [])
+    .map(path => normalizeRelPath(path))
+    .filter(Boolean));
+  const data = collectKnownCurrentMarkdownAssetReferenceData({ excludeMarkdownPaths: Array.from(excluded) });
+  const refs = data.refs;
+  const failures = [];
+  for (const markdownPath of currentManagedMarkdownPathsForAssetScan(currentRoot)) {
+    const norm = normalizeRelPath(markdownPath);
+    if (!norm || excluded.has(norm) || data.seen.has(norm)) continue;
+    const result = await fetchMarkdownForAssetScan(norm, currentRoot);
+    if (result.failed) {
+      failures.push(norm);
+      continue;
+    }
+    collectLocalMarkdownAssetReferences(result.text, norm, currentRoot).forEach(ref => refs.add(ref));
+  }
+  return { refs, failures };
+}
+
+function rejectAssetDeleteRequest(event, detail, message) {
+  if (detail && typeof detail === 'object') {
+    detail.rejected = true;
+    detail.message = message;
+  }
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
 }
 
 function handleEditorToastEvent(event) {
@@ -2989,6 +4047,7 @@ function handleEditorAssetAdded(event) {
   if (!descriptor) return;
   const bucket = ensureMarkdownAssetBucket(markdownPath);
   bucket.set(descriptor.path, descriptor);
+  removeMarkdownAssetDeletion(markdownPath, descriptor.path);
   updateMarkdownDraftStoreAssets(markdownPath, exportMarkdownAssetBucket(markdownPath));
   broadcastMarkdownAssetPreview(markdownPath);
   const tab = findDynamicTabByPath(markdownPath);
@@ -3003,16 +4062,68 @@ function handleEditorAssetAdded(event) {
   catch (_) {}
 }
 
+function handleEditorAssetDeleteRequested(event) {
+  if (!event || !event.detail) return;
+  const detail = event.detail;
+  const markdownPath = normalizeRelPath(detail.markdownPath || '');
+  const source = detail.src || detail.relativePath || '';
+  const resolved = resolveLocalMarkdownAssetReference(markdownPath, source, getContentRootSafe());
+  if (!markdownPath || !resolved) {
+    rejectAssetDeleteRequest(event, detail, textWithFallback(
+      'editor.toasts.assetDeleteUnsupported',
+      'Only local assets next to the current Markdown file can be deleted.'
+    ));
+    return;
+  }
+  const counts = countKnownMarkdownAssetReferences(resolved.contentPath, markdownPath);
+  if (counts.others > 0 || counts.owner > 1) {
+    rejectAssetDeleteRequest(event, detail, textWithFallback(
+      'editor.toasts.assetDeleteShared',
+      'This image resource is still referenced by another known Markdown document or another image block.'
+    ));
+    return;
+  }
+  const staged = stageMarkdownAssetDeletion(markdownPath, resolved);
+  if (!staged) {
+    rejectAssetDeleteRequest(event, detail, textWithFallback(
+      'editor.toasts.assetDeleteRejected',
+      'This image resource cannot be deleted yet.'
+    ));
+    return;
+  }
+  detail.assetPath = resolved.contentPath;
+  detail.commitPath = resolved.commitPath;
+  detail.relativePath = resolved.relativePath;
+  const label = resolved.relativePath || resolved.contentPath;
+  if (staged.pendingOnly) {
+    showToast('info', textWithFallback('editor.toasts.assetPendingRemoved', `Removed pending image asset ${label}.`, { label }));
+  } else {
+    showToast('success', textWithFallback('editor.toasts.assetDeleteStaged', `Staged ${label} for deletion.`, { label }));
+  }
+  try { updateUnsyncedSummary(); }
+  catch (_) {}
+}
+
+function handleEditorAssetDeleteCanceled(event) {
+  if (!event || !event.detail) return;
+  const detail = event.detail;
+  removeMarkdownAssetDeletion(detail.markdownPath || '', detail.assetPath || '');
+  try { updateUnsyncedSummary(); }
+  catch (_) {}
+}
+
 try {
   if (typeof window !== 'undefined' && window.addEventListener) {
-    window.addEventListener('ns-editor-toast', handleEditorToastEvent);
-    window.addEventListener('ns-editor-asset-added', handleEditorAssetAdded);
+    window.addEventListener('press-editor-toast', handleEditorToastEvent);
+    window.addEventListener('press-editor-asset-added', handleEditorAssetAdded);
+    window.addEventListener('press-editor-asset-delete-requested', handleEditorAssetDeleteRequested);
+    window.addEventListener('press-editor-asset-delete-canceled', handleEditorAssetDeleteCanceled);
   }
 } catch (_) {}
 
 function readMarkdownDraftStore() {
   try {
-    const raw = localStorage.getItem(MARKDOWN_DRAFT_STORAGE_KEY);
+    const raw = localStorage.getItem(scopedEditorStorageKey(MARKDOWN_DRAFT_STORAGE_KEY));
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? parsed : {};
@@ -3024,13 +4135,93 @@ function readMarkdownDraftStore() {
 function writeMarkdownDraftStore(store) {
   try {
     if (!store || !Object.keys(store).length) {
-      localStorage.removeItem(MARKDOWN_DRAFT_STORAGE_KEY);
+      localStorage.removeItem(scopedEditorStorageKey(MARKDOWN_DRAFT_STORAGE_KEY));
       return;
     }
-    localStorage.setItem(MARKDOWN_DRAFT_STORAGE_KEY, JSON.stringify(store));
+    localStorage.setItem(scopedEditorStorageKey(MARKDOWN_DRAFT_STORAGE_KEY), JSON.stringify(store));
   } catch (_) {
     /* ignore storage errors */
   }
+}
+
+async function requestPasswordForProtectedMarkdown(tab, options = {}) {
+  const protection = getMarkdownProtectionState(tab);
+  if (protection.password) return protection.password;
+  const opts = options && typeof options === 'object' ? options : {};
+  const password = await requestMarkdownProtectionPassword({
+    title: opts.title || t('editor.composer.markdown.protection.openTitle'),
+    message: opts.message || t('editor.composer.markdown.protection.openMessage'),
+    confirmLabel: opts.confirmLabel || t('editor.composer.markdown.protection.unlock'),
+    confirm: false
+  });
+  if (!password) throw new Error(t('editor.composer.markdown.protection.passwordRequiredOpen'));
+  protection.password = password;
+  protection.enabled = true;
+  return password;
+}
+
+async function decryptProtectedMarkdownForTab(markdown, tab, options = {}) {
+  const envelope = parseEncryptedMarkdownEnvelope(markdown);
+  if (!envelope.encrypted) return normalizeMarkdownContent(markdown);
+  if (!envelope.valid) {
+    throw new Error(envelope.error || t('editor.composer.markdown.protection.invalidEnvelope'));
+  }
+  const opts = options && typeof options === 'object' ? options : {};
+  const protection = getMarkdownProtectionState(tab);
+  let lastError = null;
+  for (;;) {
+    let password = protection.password;
+    if (!password) {
+      password = await requestPasswordForProtectedMarkdown(tab, {
+        title: opts.title,
+        message: opts.message,
+        confirmLabel: opts.confirmLabel
+      });
+    }
+    try {
+      const decrypted = await decryptMarkdownDocument(markdown, password);
+      setMarkdownProtectionState(tab, {
+        enabled: true,
+        password,
+        encryptedRemote: opts.remote === true ? true : !!protection.encryptedRemote,
+        encryptedDraft: opts.draft === true,
+        passwordChanged: false,
+        remoteSignature: opts.remoteSignature || protection.remoteSignature || '',
+        remoteCiphertext: envelope.ciphertext || protection.remoteCiphertext || ''
+      });
+      return normalizeMarkdownContent(decrypted);
+    } catch (err) {
+      lastError = err;
+      protection.password = '';
+      showToast('error', t('editor.composer.markdown.protection.unlockFailed'));
+    }
+  }
+  throw lastError || new Error(t('editor.composer.markdown.protection.unlockFailed'));
+}
+
+async function prepareMarkdownForProtectedStorage(tab, markdown, options = {}) {
+  const text = normalizeMarkdownContent(markdown || '');
+  if (!isMarkdownTabProtected(tab)) {
+    return { content: text, encrypted: false };
+  }
+  const protection = getMarkdownProtectionState(tab);
+  let password = protection.password;
+  if (!password) {
+    password = await requestMarkdownProtectionPassword({
+      title: t('editor.composer.markdown.protection.passwordTitle'),
+      message: t('editor.composer.markdown.protection.passwordMessage'),
+      confirmLabel: t('editor.composer.markdown.protection.keepEncrypted'),
+      confirm: false
+    });
+    if (!password) throw new Error(t('editor.composer.markdown.protection.passwordRequired'));
+    protection.password = password;
+  }
+  const encrypted = await encryptMarkdownDocument(text, password);
+  return {
+    content: normalizeMarkdownContent(encrypted.markdown),
+    encrypted: true,
+    metadata: encrypted.metadata
+  };
 }
 
 function getMarkdownDraftEntry(path) {
@@ -3045,37 +4236,58 @@ function getMarkdownDraftEntry(path) {
   const assets = Array.isArray(entry.assets)
     ? entry.assets.map(item => normalizeAssetDescriptor(item, norm)).filter(Boolean)
     : [];
+  const deletedAssets = Array.isArray(entry.deletedAssets)
+    ? entry.deletedAssets.map(item => normalizeAssetDeletionDescriptor(item, norm)).filter(Boolean)
+    : [];
   return {
     path: norm,
     content,
     savedAt: Number.isFinite(savedAt) ? savedAt : Date.now(),
     remoteSignature,
-    assets
+    assets,
+    deletedAssets,
+    encrypted: isEncryptedMarkdownDraftEntry(entry),
+    protected: isEncryptedMarkdownDraftEntry(entry)
   };
 }
 
-function saveMarkdownDraftEntry(path, content, remoteSignature = '', assets = []) {
+function saveMarkdownDraftEntry(path, content, remoteSignature = '', assets = [], options = {}) {
   const norm = normalizeRelPath(path);
   if (!norm) return null;
   const text = normalizeMarkdownContent(content);
   const store = readMarkdownDraftStore();
   const savedAt = Date.now();
+  const existing = store[norm] && typeof store[norm] === 'object' ? store[norm] : {};
   const assetList = Array.isArray(assets)
     ? assets.map(item => normalizeAssetDescriptor(item, norm)).filter(Boolean)
     : [];
+  const deletedAssetList = exportMarkdownAssetDeletionBucket(norm).length
+    ? exportMarkdownAssetDeletionBucket(norm)
+    : (Array.isArray(existing.deletedAssets)
+      ? existing.deletedAssets.map(item => normalizeAssetDeletionDescriptor(item, norm)).filter(Boolean)
+      : []);
   store[norm] = {
     content: text,
     savedAt,
     remoteSignature: String(remoteSignature || ''),
     assets: assetList
   };
+  if (deletedAssetList.length) store[norm].deletedAssets = deletedAssetList;
+  if (options && (options.encrypted === true || options.protected === true)) {
+    store[norm].encrypted = true;
+    store[norm].protected = true;
+    store[norm].format = 'press-encrypted-markdown-v1';
+  }
   writeMarkdownDraftStore(store);
   return {
     path: norm,
     content: text,
     savedAt,
     remoteSignature: String(remoteSignature || ''),
-    assets: assetList
+    assets: assetList,
+    deletedAssets: deletedAssetList,
+    encrypted: !!(options && (options.encrypted === true || options.protected === true)),
+    protected: !!(options && (options.encrypted === true || options.protected === true))
   };
 }
 
@@ -3101,26 +4313,52 @@ function restoreMarkdownDraftForTab(tab) {
     return false;
   }
   const assetsBucket = importMarkdownAssetsForPath(tab.path, entry.assets || []);
+  importMarkdownAssetDeletionsForPath(tab.path, entry.deletedAssets || []);
   tab.localDraft = {
-    content: entry.content,
+    content: entry.encrypted ? '' : entry.content,
+    encryptedContent: entry.encrypted ? entry.content : '',
+    encrypted: !!entry.encrypted,
+    protected: !!entry.protected,
+    decrypted: !entry.encrypted,
     savedAt: entry.savedAt,
     remoteSignature: entry.remoteSignature || '',
     manual: !!entry.manual,
-    assets: exportMarkdownAssetBucket(tab.path)
+    assets: exportMarkdownAssetBucket(tab.path),
+    deletedAssets: exportMarkdownAssetDeletionBucket(tab.path)
   };
-  tab.content = entry.content;
+  if (entry.encrypted) {
+    setMarkdownProtectionState(tab, {
+      ...getMarkdownProtectionState(tab),
+      enabled: true,
+      encryptedDraft: true
+    });
+  } else {
+    tab.content = entry.content;
+  }
   tab.draftConflict = false;
   tab.isDirty = true;
   tab.pendingAssets = assetsBucket || ensureMarkdownAssetBucket(tab.path);
+  if (entry.encrypted) {
+    if (tab.button) {
+      try { tab.button.setAttribute('data-dirty', '1'); } catch (_) {}
+      try { tab.button.setAttribute('data-draft-state', 'saved'); } catch (_) {}
+    }
+    updateComposerMarkdownDraftIndicators({ path: tab.path });
+    try { updateUnsyncedSummary(); } catch (_) {}
+    return true;
+  }
   updateDynamicTabDirtyState(tab, { autoSave: false });
   return true;
 }
 
-function saveMarkdownDraftForTab(tab, options = {}) {
+async function saveMarkdownDraftForTab(tab, options = {}) {
   if (!tab || !tab.path) return null;
+  const saveGeneration = getMarkdownDraftSaveGeneration(tab);
   const text = normalizeMarkdownContent(tab.content || '');
   const remoteSig = tab.remoteSignature || '';
-  if (!text) {
+  const deletedAssets = exportMarkdownAssetDeletionBucket(tab.path);
+  if (!text && !deletedAssets.length) {
+    bumpMarkdownDraftSaveGeneration(tab);
     clearMarkdownDraftEntry(tab.path);
     tab.localDraft = null;
     tab.draftConflict = false;
@@ -3129,14 +4367,26 @@ function saveMarkdownDraftForTab(tab, options = {}) {
     return null;
   }
   const assets = exportMarkdownAssetBucket(tab.path);
-  const saved = saveMarkdownDraftEntry(tab.path, text, remoteSig, assets);
+  const prepared = await prepareMarkdownForProtectedStorage(tab, text, {
+    reason: options && options.reason ? options.reason : 'draft'
+  });
+  if (saveGeneration !== getMarkdownDraftSaveGeneration(tab)) return null;
+  const saved = saveMarkdownDraftEntry(tab.path, prepared.content, remoteSig, assets, {
+    encrypted: prepared.encrypted,
+    protected: prepared.encrypted
+  });
   if (saved) {
     tab.localDraft = {
-      content: saved.content,
+      content: text,
+      encryptedContent: saved.encrypted ? saved.content : '',
+      encrypted: !!saved.encrypted,
+      protected: !!saved.protected,
+      decrypted: true,
       savedAt: saved.savedAt,
       remoteSignature: saved.remoteSignature,
       manual: !!options.markManual,
-      assets: saved.assets || []
+      assets: saved.assets || [],
+      deletedAssets: saved.deletedAssets || []
     };
     updateComposerMarkdownDraftIndicators({ path: tab.path });
     try { updateUnsyncedSummary(); } catch (_) {}
@@ -3146,6 +4396,7 @@ function saveMarkdownDraftForTab(tab, options = {}) {
 
 function clearMarkdownDraftForTab(tab) {
   if (!tab || !tab.path) return;
+  bumpMarkdownDraftSaveGeneration(tab);
   try {
     if (tab.markdownDraftTimer) {
       clearTimeout(tab.markdownDraftTimer);
@@ -3181,27 +4432,37 @@ function scheduleMarkdownDraftSave(tab) {
       clearMarkdownDraftForTab(tab);
       return;
     }
-    saveMarkdownDraftForTab(tab);
-    if (currentMode === tab.mode) pushEditorCurrentFileInfo(tab);
+    saveMarkdownDraftForTab(tab)
+      .then(() => {
+        if (currentMode === tab.mode) pushEditorCurrentFileInfo(tab);
+      })
+      .catch((err) => {
+        console.error('Failed to save markdown draft', err);
+        showToast('error', t('editor.composer.markdown.save.toastError'));
+      });
   }, 720);
 }
 
-function flushMarkdownDraft(tab) {
-  if (!tab) return;
+async function flushMarkdownDraft(tab) {
+  if (!tab) return null;
   if (tab.markdownDraftTimer) {
     clearTimeout(tab.markdownDraftTimer);
     tab.markdownDraftTimer = null;
     if (tab.isDirty) {
-      saveMarkdownDraftForTab(tab);
+      return saveMarkdownDraftForTab(tab);
     }
   }
+  return null;
 }
 
 function updateDynamicTabDirtyState(tab, options = {}) {
   if (!tab || !tab.path) return;
   const normalizedContent = normalizeMarkdownContent(tab.content || '');
   const baseline = normalizeMarkdownContent(tab.remoteContent || '');
-  const dirty = normalizedContent !== baseline;
+  const protection = getMarkdownProtectionState(tab);
+  const protectionChanged = protection.enabled !== protection.encryptedRemote || protection.passwordChanged;
+  const assetDeletionDirty = countMarkdownAssetDeletions(tab.path) > 0;
+  const dirty = normalizedContent !== baseline || protectionChanged || assetDeletionDirty;
   tab.isDirty = dirty;
 
   let conflict = false;
@@ -3257,7 +4518,7 @@ function hasUnsavedMarkdownDrafts() {
   for (const tab of dynamicEditorTabs.values()) {
     if (!tab) continue;
     if (tab.isDirty) return true;
-    if (tab.localDraft && normalizeMarkdownContent(tab.localDraft.content || '')) return true;
+    if (hasMarkdownDraftContent(tab)) return true;
   }
   try {
     const store = readMarkdownDraftStore();
@@ -3677,13 +4938,13 @@ function refreshEditorLanguageUi() {
   refreshFileDirtyBadges();
   try {
     refreshEditorContentTree({
-      preserveStructure: currentMode && (isDynamicMode(currentMode) || currentMode === 'composer' || currentMode === 'updates' || currentMode === 'sync')
+      preserveStructure: currentMode && (isDynamicMode(currentMode) || currentMode === 'composer' || currentMode === 'themes' || currentMode === 'updates' || currentMode === 'sync')
     });
   } catch (_) {}
 }
 
 if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-  document.addEventListener('ns-editor-language-applied', refreshEditorLanguageUi);
+  document.addEventListener('press-editor-language-applied', refreshEditorLanguageUi);
 }
 
 function collectUnsyncedMarkdownEntries() {
@@ -3694,9 +4955,10 @@ function collectUnsyncedMarkdownEntries() {
     if (!tab || !tab.path) return;
     const path = normalizeRelPath(tab.path);
     if (!path || seen.has(path)) return;
-    const hasDraftContent = !!(tab.localDraft && normalizeMarkdownContent(tab.localDraft.content || ''));
+    const hasDraftContent = hasMarkdownDraftContent(tab);
     const hasDirtyChanges = !!tab.isDirty;
-    if (!hasDirtyChanges && !hasDraftContent) return;
+    const assetDeletionCount = countMarkdownAssetDeletions(path);
+    if (!hasDirtyChanges && !hasDraftContent && !assetDeletionCount) return;
     let state = '';
     if (tab.draftConflict) state = 'conflict';
     else if (hasDirtyChanges) state = 'dirty';
@@ -3709,6 +4971,7 @@ function collectUnsyncedMarkdownEntries() {
     };
     const assetCount = countMarkdownAssets(path);
     if (assetCount) entry.assetCount = assetCount;
+    if (assetDeletionCount) entry.assetDeletionCount = assetDeletionCount;
     entries.push(entry);
     seen.add(path);
   });
@@ -3721,8 +4984,10 @@ function collectUnsyncedMarkdownEntries() {
       const entry = store[key];
       if (!entry || typeof entry !== 'object') return;
       const content = entry.content != null ? normalizeMarkdownContent(entry.content) : '';
-      if (!content) return;
       importMarkdownAssetsForPath(path, entry.assets || []);
+      importMarkdownAssetDeletionsForPath(path, entry.deletedAssets || []);
+      const assetDeletionCount = countMarkdownAssetDeletions(path);
+      if (!content && !assetDeletionCount) return;
       const item = {
         kind: 'markdown',
         label: path,
@@ -3731,6 +4996,7 @@ function collectUnsyncedMarkdownEntries() {
       };
       const assetCount = countMarkdownAssets(path);
       if (assetCount) item.assetCount = assetCount;
+      if (assetDeletionCount) item.assetDeletionCount = assetDeletionCount;
       entries.push(item);
       seen.add(path);
     });
@@ -3782,8 +5048,17 @@ function computeUnsyncedSummary() {
       entries.push({ ...entry, kind: 'system' });
     });
   }
+  const themeEntries = getThemeManagerSummaryEntries();
+  if (themeEntries && themeEntries.length) {
+    themeEntries.forEach((entry) => {
+      if (!entry || typeof entry !== 'object') return;
+      entries.push({ ...entry, kind: 'system', category: 'theme' });
+    });
+  }
   const markdownEntries = collectUnsyncedMarkdownEntries();
   if (markdownEntries.length) entries.push(...markdownEntries);
+  const assetDeletionEntries = listMarkdownAssetDeletions();
+  if (assetDeletionEntries.length) entries.push(...assetDeletionEntries);
   return entries;
 }
 
@@ -3886,11 +5161,13 @@ function updateModeDirtyIndicators(summaryEntries) {
   let composerCount = 0;
   let editorCount = 0;
   let updatesCount = 0;
+  let themesCount = 0;
 
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') continue;
     if (entry.kind === 'index' || entry.kind === 'tabs' || entry.kind === 'site') composerCount += 1;
     else if (entry.kind === 'markdown') editorCount += 1;
+    else if (entry.kind === 'system' && entry.category === 'theme') themesCount += 1;
     else if (entry.kind === 'system') updatesCount += 1;
   }
 
@@ -3909,9 +5186,10 @@ function updateModeDirtyIndicators(summaryEntries) {
 
   applyModeTabBadgeState('composer', composerCount);
   applyModeTabBadgeState('editor', editorCount);
+  applyModeTabBadgeState('themes', themesCount);
   applyModeTabBadgeState('updates', updatesCount);
   try {
-    refreshEditorContentTree({ preserveStructure: currentMode && (isDynamicMode(currentMode) || currentMode === 'composer' || currentMode === 'updates' || currentMode === 'sync') });
+    refreshEditorContentTree({ preserveStructure: currentMode && (isDynamicMode(currentMode) || currentMode === 'composer' || currentMode === 'themes' || currentMode === 'updates' || currentMode === 'sync') });
   } catch (_) {}
 }
 
@@ -4031,7 +5309,7 @@ function exportIndexDataForSeo(state) {
       const value = entry[lang];
       if (Array.isArray(value)) {
         const normalized = value
-          .map((item) => (item == null ? '' : String(item)))
+          .map((item) => getIndexVariantLocation(item))
           .filter((item) => item);
         if (!normalized.length) return;
         if (normalized.length === 1) langs[lang] = normalized[0];
@@ -4039,11 +5317,275 @@ function exportIndexDataForSeo(state) {
       } else if (typeof value === 'string') {
         const trimmed = value.trim();
         if (trimmed) langs[lang] = trimmed;
+      } else if (isIndexMetadataObject(value)) {
+        const location = getIndexVariantLocation(value);
+        if (location) langs[lang] = location;
       }
     });
     if (Object.keys(langs).length) output[key] = langs;
   });
   return output;
+}
+
+const INDEX_PUBLISH_METADATA_KEYS = new Set([
+  'location',
+  'path',
+  'title',
+  'date',
+  'tag',
+  'tags',
+  'image',
+  'thumb',
+  'cover',
+  'excerpt',
+  'readTime',
+  'readMinutes',
+  'minutes',
+  'protected',
+  'encryption',
+  'version',
+  'versionLabel',
+  'ai',
+  'aiGenerated',
+  'llm',
+  'draft',
+  'wip',
+  'unfinished',
+  'inprogress'
+]);
+
+function interpretIndexTruthyFlag(value) {
+  if (value === true) return true;
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'y' || normalized === 'on' || normalized === 'enabled';
+}
+
+function isIndexVariantPublishComplete(value) {
+  if (!isIndexMetadataObject(value)) return false;
+  if (!getIndexVariantLocation(value)) return false;
+  if (!safeString(value.title).trim()) return false;
+  if (value.protected == null && value.encryption == null) return false;
+  const protectedPost = interpretIndexTruthyFlag(value.protected) || !!value.encryption;
+  if (protectedPost) return !!safeString(value.excerpt).trim() || value.readTime != null;
+  return value.readTime != null && safeString(value.excerpt).trim();
+}
+
+function normalizeIndexPublishTags(value) {
+  if (Array.isArray(value)) {
+    const tags = value.map(item => safeString(item).trim()).filter(Boolean);
+    return tags.length ? tags : undefined;
+  }
+  const tag = safeString(value).trim();
+  return tag || undefined;
+}
+
+function resolveIndexPublishImage(image, location) {
+  const raw = safeString(image).trim();
+  if (!raw) return undefined;
+  if (/^(https?:|data:)/i.test(raw) || raw.startsWith('/')) return raw;
+  const lastSlash = safeString(location).lastIndexOf('/');
+  const baseDir = lastSlash >= 0 ? safeString(location).slice(0, lastSlash + 1) : '';
+  return normalizeRelPath(`${baseDir}${raw}`) || raw;
+}
+
+function getIndexGeneratedMetadata(existing = {}) {
+  const out = {};
+  if (!isIndexMetadataObject(existing)) return out;
+  Object.keys(existing).forEach((key) => {
+    if (INDEX_PUBLISH_METADATA_KEYS.has(key)) return;
+    const cloned = cloneIndexMetadataValue(existing[key]);
+    if (cloned !== undefined && cloned !== null && cloned !== '') out[key] = cloned;
+  });
+  return out;
+}
+
+function getIndexField(source, keys) {
+  const input = isIndexMetadataObject(source) ? source : {};
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(input, key)) {
+      return { found: true, key, value: input[key] };
+    }
+  }
+  return { found: false, key: '', value: undefined };
+}
+
+function copyExistingIndexFields(out, existing, keys) {
+  if (!out || !isIndexMetadataObject(existing)) return false;
+  let copied = false;
+  keys.forEach((key) => {
+    if (!Object.prototype.hasOwnProperty.call(existing, key)) return;
+    const cloned = cloneIndexMetadataValue(existing[key]);
+    if (cloned === undefined || cloned === null || cloned === '') return;
+    out[key] = cloned;
+    copied = true;
+  });
+  return copied;
+}
+
+function buildIndexMetadataFromMarkdown(markdown, location, fallbackTitle, existing = {}, options = {}) {
+  const source = normalizeMarkdownContent(markdown || '');
+  const plaintext = normalizeMarkdownContent(options.plaintextContent || '');
+  const envelope = parseEncryptedMarkdownEnvelope(source);
+  const { frontMatter } = parseFrontMatter(source);
+  const fm = frontMatter || {};
+  const protectedField = getIndexField(fm, ['protected', 'encryption']);
+  const explicitUnprotected = options.protectionExplicit === true && options.protected === false;
+  const existingProtected = interpretIndexTruthyFlag(existing.protected) || !!existing.encryption;
+  const protectedPost = !!options.protected
+    || envelope.encrypted
+    || (protectedField.found ? interpretIndexTruthyFlag(protectedField.value) : (!explicitUnprotected && existingProtected));
+  const out = {
+    ...getIndexGeneratedMetadata(existing),
+    location
+  };
+  const title = safeString(fm.title || existing.title || fallbackTitle).trim();
+  if (title) out.title = title;
+  const dateField = getIndexField(fm, ['date']);
+  if (dateField.found) {
+    if (safeString(dateField.value).trim()) out.date = dateField.value;
+  } else {
+    copyExistingIndexFields(out, existing, ['date']);
+  }
+  const tagsField = getIndexField(fm, ['tags', 'tag']);
+  if (tagsField.found) {
+    const tags = normalizeIndexPublishTags(tagsField.value);
+    if (tags !== undefined) out.tags = tags;
+  } else {
+    copyExistingIndexFields(out, existing, ['tags', 'tag']);
+  }
+  const imageField = getIndexField(fm, ['image', 'cover', 'thumb']);
+  if (imageField.found) {
+    const image = resolveIndexPublishImage(imageField.value, location);
+    if (image) out.image = image;
+  } else {
+    copyExistingIndexFields(out, existing, ['image', 'cover', 'thumb']);
+  }
+  const excerptField = getIndexField(fm, ['excerpt']);
+  const excerpt = protectedPost
+    ? safeString(excerptField.found ? excerptField.value : existing.excerpt).trim()
+    : safeString(excerptField.found ? excerptField.value : extractExcerpt(source, 50)).trim();
+  if (excerpt) out.excerpt = excerpt;
+  const readSource = plaintext || (!protectedPost ? source : '');
+  if (readSource) out.readTime = computeReadTime(readSource, 200);
+  else {
+    const readTimeField = getIndexField(existing, ['readTime', 'readMinutes', 'minutes']);
+    if (readTimeField.found && readTimeField.value !== '') out.readTime = cloneIndexMetadataValue(readTimeField.value);
+  }
+  out.protected = !!protectedPost;
+  const versionField = getIndexField(fm, ['version', 'versionLabel']);
+  if (versionField.found) {
+    const versionLabel = safeString(versionField.value).trim();
+    if (versionLabel) out.versionLabel = versionLabel;
+  } else if (!copyExistingIndexFields(out, existing, ['versionLabel', 'version'])) {
+    const versionLabel = safeString(extractVersionFromPath(location)).trim();
+    if (versionLabel) out.versionLabel = versionLabel;
+  }
+  const aiField = getIndexField(fm, ['ai', 'aiGenerated', 'llm']);
+  if (aiField.found) {
+    if (interpretIndexTruthyFlag(aiField.value)) out.ai = true;
+  } else {
+    copyExistingIndexFields(out, existing, ['ai', 'aiGenerated', 'llm']);
+  }
+  const draftField = getIndexField(fm, ['draft', 'wip', 'unfinished', 'inprogress']);
+  if (draftField.found) {
+    if (interpretIndexTruthyFlag(draftField.value)) out.draft = true;
+  } else {
+    copyExistingIndexFields(out, existing, ['draft', 'wip', 'unfinished', 'inprogress']);
+  }
+  return out;
+}
+
+async function readMarkdownForIndexMetadata(location, pendingMarkdownByPath, contentRoot) {
+  const normalized = normalizeRelPath(location);
+  if (!normalized) return null;
+  if (pendingMarkdownByPath && pendingMarkdownByPath.has(normalized)) {
+    const pending = pendingMarkdownByPath.get(normalized);
+    return pending && typeof pending === 'object'
+      ? { ...pending, protectionExplicit: true }
+      : { content: normalizeMarkdownContent(pending || ''), plaintextContent: '', protected: false, protectionExplicit: true };
+  }
+  const tab = findDynamicTabByPath(normalized);
+  if (tab) {
+    const locked = getLockedEncryptedMarkdownDraft(tab);
+    if (locked) return { content: locked, plaintextContent: '', protected: true, protectionExplicit: true };
+    if (tab.content != null) {
+      const protection = getMarkdownProtectionState(tab);
+      return {
+        content: normalizeMarkdownContent(tab.content),
+        plaintextContent: normalizeMarkdownContent(tab.content),
+        protected: !!(protection && protection.enabled),
+        protectionExplicit: true
+      };
+    }
+    if (tab.remoteContent != null) {
+      const protection = getMarkdownProtectionState(tab);
+      return {
+        content: normalizeMarkdownContent(tab.remoteContent),
+        plaintextContent: normalizeMarkdownContent(tab.remoteContent),
+        protected: !!(protection && protection.enabled),
+        protectionExplicit: true
+      };
+    }
+  }
+  const root = safeString(contentRoot || getContentRootSafe() || 'wwwroot').replace(/\\+/g, '/').replace(/\/?$/, '');
+  const url = `${root || 'wwwroot'}/${normalized}`;
+  try {
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response || !response.ok) return null;
+    return { content: normalizeMarkdownContent(await response.text()), plaintextContent: '', protected: false };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function enrichIndexStateForPublish(state, options = {}) {
+  const source = prepareIndexState(state || { __order: [] });
+  const next = deepClone(source);
+  const pendingMarkdownByPath = options.pendingMarkdownByPath instanceof Map ? options.pendingMarkdownByPath : new Map();
+  const contentRoot = options.contentRoot || 'wwwroot';
+  const keys = Array.isArray(next.__order) ? next.__order.slice() : Object.keys(next).filter(key => key !== '__order');
+  for (const key of keys) {
+    const entry = next[key];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    for (const lang of sortLangKeys(entry)) {
+      const originalValue = entry[lang];
+      const originalWasArray = Array.isArray(originalValue);
+      const variants = normalizeIndexVariantList(originalValue);
+      const enriched = [];
+      for (const variant of variants) {
+        const location = getIndexVariantLocation(variant);
+        if (!location) continue;
+        if (isIndexVariantPublishComplete(variant) && !pendingMarkdownByPath.has(location)) {
+          enriched.push(variant);
+          continue;
+        }
+        const markdownEntry = await readMarkdownForIndexMetadata(location, pendingMarkdownByPath, contentRoot);
+        if (!markdownEntry || !markdownEntry.content) {
+          enriched.push(variant);
+          continue;
+        }
+        enriched.push(buildIndexMetadataFromMarkdown(
+          markdownEntry.content,
+          location,
+          key,
+          isIndexMetadataObject(variant) ? variant : {},
+          {
+            plaintextContent: markdownEntry.plaintextContent,
+            protected: markdownEntry.protected,
+            protectionExplicit: markdownEntry.protectionExplicit
+          }
+        ));
+      }
+      if (!enriched.length) {
+        delete entry[lang];
+      } else if (originalWasArray || enriched.length > 1) {
+        entry[lang] = enriched;
+      } else {
+        entry[lang] = enriched[0];
+      }
+    }
+  }
+  return next;
 }
 
 function exportTabsDataForSeo(state) {
@@ -4228,7 +5770,7 @@ function generateSeoRobotsTxt(siteConfig) {
   robots += `Allow: ${withBasePath('sitemap-generator.html')}\n\n`;
   robots += '# Crawl delay (be nice to servers)\n';
   robots += 'Crawl-delay: 1\n\n';
-  robots += '# Generated by NanoSite\n';
+  robots += '# Generated by Press\n';
   robots += `# ${new Date().toISOString()}\n`;
   return robots;
 }
@@ -4243,8 +5785,8 @@ function generateSeoMetaTags(siteConfig) {
     if (langs.length) return val[langs[0]];
     return fallback;
   };
-  const siteTitle = getLocalizedValue(siteConfig.siteTitle, 'NanoSite');
-  const siteDescription = getLocalizedValue(siteConfig.siteDescription, 'A pure front-end blog template');
+  const siteTitle = getLocalizedValue(siteConfig.siteTitle, 'Press');
+  const siteDescription = getLocalizedValue(siteConfig.siteDescription, 'Where knowledge becomes pages.');
   const siteKeywords = getLocalizedValue(siteConfig.siteKeywords, 'blog, static site, markdown');
   const avatar = siteConfig.avatar || 'assets/avatar.png';
   const fullAvatarUrl = avatar.startsWith('http') ? avatar : baseUrl + avatar.replace(/^\/+/, '');
@@ -4335,11 +5877,11 @@ function buildDefaultIndexHtml(metaBlock, lang) {
   html += '  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n\n';
   html += metaSection;
   html += '  <!-- Note: Structured data is dynamically generated by the SEO system -->\n\n';
-  html += '  <script src="assets/js/theme-boot.js"></script>\n';
+  html += '  <script src="assets/js/theme-boot.js?v=press-system-v3.4.16"></script>\n';
   html += '  <link rel="stylesheet" id="theme-pack">\n';
   html += '</head>\n\n';
   html += '<body>\n';
-  html += '  <script type="module" src="assets/main.js?v=20260430state"></script>\n';
+  html += '  <script type="module" src="assets/main.js?v=press-system-v3.4.16"></script>\n';
   html += '</body>\n\n';
   html += '</html>\n';
   return html;
@@ -4421,7 +5963,7 @@ async function generateSeoCommitFiles() {
 
 async function gatherCommitPayload(options = {}) {
   const { showSeoStatus = false } = options;
-  const base = gatherLocalChangesForCommit(options);
+  const base = await gatherLocalChangesForCommit(options);
   const files = Array.isArray(base.files) ? base.files.slice() : [];
   if (showSeoStatus) {
     try {
@@ -4435,7 +5977,91 @@ async function gatherCommitPayload(options = {}) {
   return { files, seoFiles };
 }
 
-function gatherLocalChangesForCommit(options = {}) {
+function collectDirtyMarkdownPathsForDeletion() {
+  const paths = new Set();
+  dynamicEditorTabs.forEach((tab) => {
+    if (!tab || !tab.path) return;
+    if (tab.isDirty || hasMarkdownDraftContent(tab)) paths.add(tab.path);
+  });
+  try {
+    const store = readMarkdownDraftStore();
+    if (store && typeof store === 'object') {
+      Object.keys(store).forEach((key) => {
+        const entry = store[key];
+        if (!entry || typeof entry !== 'object') return;
+        const hasContent = entry.content != null && normalizeMarkdownContent(entry.content);
+        const hasAssets = Array.isArray(entry.assets) && entry.assets.length;
+        const hasDeletedAssets = draftHasAssetDeletions(entry);
+        if (hasContent || hasAssets || hasDeletedAssets) paths.add(key);
+      });
+    }
+  } catch (_) {}
+  return Array.from(paths);
+}
+
+function formatRepositoryDeletionBlockers(blocked = []) {
+  const paths = (Array.isArray(blocked) ? blocked : [])
+    .map(item => item && item.path ? String(item.path) : '')
+    .filter(Boolean);
+  if (!paths.length) {
+    return textWithFallback(
+      'editor.toasts.repositoryDeletionDraftsPending',
+      'Unable to delete files while local drafts are still pending.'
+    );
+  }
+  const sample = paths.slice(0, 5).join(', ');
+  const remaining = paths.length > 5 ? paths.length - 5 : 0;
+  const fallbackSuffix = remaining ? `, +${remaining} more` : '';
+  return textWithFallback(
+    'editor.toasts.repositoryDeletionDraftsBlocked',
+    `Publish blocked because deleted files still have local drafts: ${sample}${fallbackSuffix}. Restore, publish, or discard those drafts before deleting the files.`,
+    { sample, remaining }
+  );
+}
+
+async function fetchMarkdownForRepositoryDeletion(file) {
+  const path = file && file.path ? String(file.path).replace(/\\+/g, '/').replace(/^\/+/, '') : '';
+  if (!path) return '';
+  try {
+    const resp = await fetch(`${path}?ts=${Date.now()}`, { cache: 'no-store' });
+    if (!resp.ok) return '';
+    return normalizeMarkdownContent(await resp.text());
+  } catch (_) {
+    return '';
+  }
+}
+
+async function collectDeletedMarkdownAssetFiles(markdownDeletionFiles = [], options = {}) {
+  const contentRoot = options.contentRoot || 'wwwroot';
+  const referencedAssets = options.referencedAssets instanceof Set ? options.referencedAssets : new Set();
+  const out = [];
+  const seen = new Set();
+  for (const file of Array.isArray(markdownDeletionFiles) ? markdownDeletionFiles : []) {
+    if (!file || !file.deleted || !file.markdownPath) continue;
+    const markdown = await fetchMarkdownForRepositoryDeletion(file);
+    if (!markdown) continue;
+    listLocalMarkdownAssetReferences(markdown, file.markdownPath, contentRoot).forEach((resolved) => {
+      if (!resolved || !resolved.contentPath || !resolved.commitPath) return;
+      if (referencedAssets.has(resolved.contentPath)) return;
+      if (seen.has(resolved.commitPath)) return;
+      seen.add(resolved.commitPath);
+      out.push({
+        kind: 'asset',
+        category: 'content-asset',
+        label: resolved.relativePath || resolved.contentPath,
+        path: resolved.commitPath,
+        markdownPath: resolved.markdownPath,
+        assetPath: resolved.contentPath,
+        assetRelativePath: resolved.relativePath || '',
+        state: 'deleted',
+        deleted: true
+      });
+    });
+  }
+  return out;
+}
+
+async function gatherLocalChangesForCommit(options = {}) {
   const { cleanupUnusedAssets = true } = options;
   const files = [];
   const seenPaths = new Set();
@@ -4444,11 +6070,26 @@ function gatherLocalChangesForCommit(options = {}) {
     const key = entry.path.replace(/\\+/g, '/');
     if (seenPaths.has(key)) return;
     seenPaths.add(key);
-    files.push({ ...entry, path: key });
+    const next = { ...entry, path: key };
+    if (entry.plaintextContent) {
+      Object.defineProperty(next, 'plaintextContent', {
+        value: String(entry.plaintextContent || ''),
+        enumerable: false,
+        configurable: true,
+        writable: true
+      });
+    }
+    files.push(next);
   };
 
   try {
-    dynamicEditorTabs.forEach((tab) => { flushMarkdownDraft(tab); });
+    const flushes = Array.from(dynamicEditorTabs.values()).map((tab) => (
+      flushMarkdownDraft(tab).catch((err) => {
+        console.warn('Failed to flush markdown draft before commit', err);
+        return null;
+      })
+    ));
+    await Promise.all(flushes);
   } catch (_) { /* ignore */ }
 
   const siteState = getStateSlice('site');
@@ -4462,12 +6103,17 @@ function gatherLocalChangesForCommit(options = {}) {
   const normalizedRoot = String(root || '')
     .replace(/\\+/g, '/').replace(/\/?$/, '');
   const rootPrefix = normalizedRoot ? `${normalizedRoot}/` : '';
+  const baselineRoot = (() => {
+    const baselineSite = remoteBaseline && remoteBaseline.site && typeof remoteBaseline.site === 'object'
+      ? remoteBaseline.site
+      : {};
+    const raw = Object.prototype.hasOwnProperty.call(baselineSite, 'contentRoot')
+      ? safeString(baselineSite.contentRoot)
+      : '';
+    return String(raw || 'wwwroot').replace(/\\+/g, '/').replace(/\/?$/, '');
+  })();
+  const pendingMarkdownByPath = new Map();
 
-  if (composerDiffCache.index && composerDiffCache.index.hasChanges) {
-    const state = getStateSlice('index') || { __order: [] };
-    const yaml = toIndexYaml(state);
-    addFile({ kind: 'index', label: 'index.yaml', path: `${rootPrefix}index.yaml`, content: yaml });
-  }
   if (composerDiffCache.tabs && composerDiffCache.tabs.hasChanges) {
     const state = getStateSlice('tabs') || { __order: [] };
     const yaml = toTabsYaml(state);
@@ -4477,6 +6123,39 @@ function gatherLocalChangesForCommit(options = {}) {
     const state = getStateSlice('site') || {};
     const yaml = toSiteYaml(state);
     addFile({ kind: 'site', label: 'site.yaml', path: 'site.yaml', content: yaml });
+  }
+
+  const contentDeletionPlan = planManagedContentDeletions({
+    index: getStateSlice('index') || { __order: [] },
+    tabs: getStateSlice('tabs') || { __order: [] },
+    indexBaseline: remoteBaseline.index || { __order: [] },
+    tabsBaseline: remoteBaseline.tabs || { __order: [] },
+    indexDiff: composerDiffCache.index,
+    tabsDiff: composerDiffCache.tabs,
+    contentRoot: normalizedRoot || 'wwwroot',
+    currentContentRoot: normalizedRoot || 'wwwroot',
+    baselineContentRoot: baselineRoot || 'wwwroot',
+    dirtyMarkdownPaths: collectDirtyMarkdownPathsForDeletion()
+  });
+  if (contentDeletionPlan.blocked.length) {
+    throw new Error(formatRepositoryDeletionBlockers(contentDeletionPlan.blocked));
+  }
+  contentDeletionPlan.files.forEach(addFile);
+  const assetReferenceScan = await collectCurrentRepositoryMarkdownAssetReferences({
+    excludeMarkdownPaths: contentDeletionPlan.files.map(file => file && file.markdownPath).filter(Boolean),
+    currentContentRoot: normalizedRoot || 'wwwroot',
+    baselineContentRoot: baselineRoot || 'wwwroot'
+  });
+  const referencedAssetPaths = assetReferenceScan.refs;
+  const assetReferenceScanComplete = !(assetReferenceScan.failures && assetReferenceScan.failures.length);
+  if (assetReferenceScanComplete) {
+    const deletedMarkdownAssetFiles = await collectDeletedMarkdownAssetFiles(contentDeletionPlan.files, {
+      contentRoot: baselineRoot || 'wwwroot',
+      referencedAssets: referencedAssetPaths
+    });
+    deletedMarkdownAssetFiles.forEach(addFile);
+  } else {
+    console.warn('Skipping repository asset deletions because some current markdown files could not be checked.', assetReferenceScan.failures);
   }
 
   const markdownEntries = collectUnsyncedMarkdownEntries();
@@ -4489,17 +6168,22 @@ function gatherLocalChangesForCommit(options = {}) {
       catch (_) { activeValue = null; }
     }
     const draftStore = readMarkdownDraftStore();
-    markdownEntries.forEach((entry) => {
+    for (const entry of markdownEntries) {
       const rel = normalizeRelPath(entry.path);
-      if (!rel) return;
+      if (!rel) continue;
       const repoPath = `${rootPrefix}${rel}`;
       const tab = findDynamicTabByPath(rel);
       let text = '';
+      let alreadyEncrypted = false;
       if (tab) {
-        if (tab === activeTab && activeValue != null) {
+        const lockedEncryptedDraft = getLockedEncryptedMarkdownDraft(tab);
+        if (lockedEncryptedDraft) {
+          text = lockedEncryptedDraft;
+          alreadyEncrypted = true;
+        } else if (tab === activeTab && activeValue != null) {
           tab.content = activeValue;
-        }
-        if (tab.content != null && tab.content !== undefined) {
+          text = normalizeMarkdownContent(tab.content);
+        } else if (tab.content != null && tab.content !== undefined) {
           text = normalizeMarkdownContent(tab.content);
         } else if (tab.localDraft && tab.localDraft.content != null) {
           text = normalizeMarkdownContent(tab.localDraft.content);
@@ -4507,14 +6191,25 @@ function gatherLocalChangesForCommit(options = {}) {
       } else if (draftStore && draftStore[rel] && typeof draftStore[rel] === 'object') {
         const draft = draftStore[rel];
         if (draft.content != null) text = normalizeMarkdownContent(draft.content);
+        alreadyEncrypted = isEncryptedMarkdownDraftEntry(draft);
       }
+      const prepared = alreadyEncrypted
+        ? { content: text, encrypted: true }
+        : await prepareMarkdownForProtectedStorage(tab, text, { reason: 'commit' });
+      pendingMarkdownByPath.set(rel, {
+        content: prepared.content,
+        plaintextContent: prepared.encrypted && !alreadyEncrypted ? text : '',
+        protected: !!prepared.encrypted
+      });
       addFile({
         kind: 'markdown',
         label: rel,
         path: repoPath,
-        content: text,
+        content: prepared.content,
+        plaintextContent: prepared.encrypted && !alreadyEncrypted ? text : '',
         markdownPath: rel,
-        state: entry.state || ''
+        state: entry.state || '',
+        protected: !!prepared.encrypted
       });
 
       const assets = listMarkdownAssets(rel);
@@ -4524,7 +6219,7 @@ function gatherLocalChangesForCommit(options = {}) {
         assets.forEach((asset) => {
           if (!asset || !asset.path || !asset.base64) return;
           const commitPath = `${rootPrefix}${asset.path}`.replace(/\\+/g, '/');
-          if (!isAssetReferencedInContent(normalizedText, asset)) {
+          if (!alreadyEncrypted && !isAssetReferencedInContent(normalizedText, asset)) {
             unusedAssets.push(asset.path);
             return;
           }
@@ -4547,6 +6242,43 @@ function gatherLocalChangesForCommit(options = {}) {
           });
         }
       }
+    }
+  }
+
+  const originalIndexDiff = composerDiffCache.index || recomputeDiff('index');
+  const indexState = getStateSlice('index') || { __order: [] };
+  let indexYaml = toIndexYaml(indexState);
+  let indexMetadataChanged = false;
+  if ((originalIndexDiff && originalIndexDiff.hasChanges) || pendingMarkdownByPath.size > 0) {
+    const enrichedIndexState = await enrichIndexStateForPublish(indexState, {
+      contentRoot: normalizedRoot || 'wwwroot',
+      pendingMarkdownByPath
+    });
+    const enrichedIndexYaml = toIndexYaml(enrichedIndexState);
+    indexMetadataChanged = enrichedIndexYaml !== indexYaml;
+    if (indexMetadataChanged) {
+      setStateSlice('index', enrichedIndexState);
+      composerDiffCache.index = computeIndexDiff(enrichedIndexState, remoteBaseline.index);
+      indexYaml = enrichedIndexYaml;
+    }
+  }
+  if ((originalIndexDiff && originalIndexDiff.hasChanges) || indexMetadataChanged) {
+    addFile({ kind: 'index', label: 'index.yaml', path: `${rootPrefix}index.yaml`, content: indexYaml });
+  }
+
+  const assetDeletionRefs = referencedAssetPaths;
+  if (assetReferenceScanComplete) {
+    listMarkdownAssetDeletions().forEach((asset) => {
+      if (!asset || !asset.assetPath || !asset.deleted) return;
+      if (assetDeletionRefs.has(asset.assetPath)) return;
+      const commitPath = `${rootPrefix}${asset.assetPath}`.replace(/\\+/g, '/');
+      addFile({
+        ...asset,
+        label: asset.assetRelativePath || asset.label || asset.assetPath,
+        path: commitPath,
+        deleted: true,
+        state: 'deleted'
+      });
     });
   }
 
@@ -4555,6 +6287,13 @@ function gatherLocalChangesForCommit(options = {}) {
     systemFiles.forEach((entry) => {
       if (!entry || typeof entry !== 'object') return;
       addFile({ ...entry, kind: 'system' });
+    });
+  }
+  const themeFiles = getThemeManagerCommitFiles();
+  if (themeFiles && themeFiles.length) {
+    themeFiles.forEach((entry) => {
+      if (!entry || typeof entry !== 'object') return;
+      addFile({ ...entry, kind: 'system', category: 'theme' });
     });
   }
 
@@ -4609,7 +6348,10 @@ function describeSummaryEntry(entry) {
     const assetLabel = entry.assetCount
       ? ` – ${entry.assetCount} image${entry.assetCount === 1 ? '' : 's'}`
       : '';
-    return `${base}${status}${assetLabel}`;
+    const assetDeletionLabel = entry.assetDeletionCount
+      ? ` – ${entry.assetDeletionCount} image deletion${entry.assetDeletionCount === 1 ? '' : 's'}`
+      : '';
+    return `${base}${status}${assetLabel}${assetDeletionLabel}`;
   }
   if (entry.kind === 'index' || entry.kind === 'tabs') {
     const bits = [];
@@ -4628,11 +6370,16 @@ function describeSummaryEntry(entry) {
           : 'Meta tags';
     return `${base} – auto-generated SEO (${type})`;
   }
+  if (entry.kind === 'asset' && (entry.deleted || entry.state === 'deleted')) {
+    return `${base} (deleted)`;
+  }
   if (entry.kind === 'system') {
     let label = '';
     try {
-      const key = entry.state === 'added' ? 'added' : 'modified';
+      const key = entry.state === 'added' ? 'added' : (entry.state === 'deleted' || entry.deleted ? 'deleted' : 'modified');
+      const scope = entry.category === 'theme' ? 'theme file' : 'system file';
       label = t(`editor.systemUpdates.summary.${key}`);
+      if (!label || label === `editor.systemUpdates.summary.${key}`) label = `${key} ${scope}`;
     } catch (_) { label = ''; }
     if (label) return `${base} – ${label}`;
     return `${base} – system file update`;
@@ -4647,11 +6394,11 @@ function openGithubCommitFilePreview(file, triggerEl) {
   if (!file) return;
 
   const previewModal = document.createElement('div');
-  previewModal.className = 'ns-modal github-preview-modal';
+  previewModal.className = 'press-modal github-preview-modal';
   previewModal.setAttribute('aria-hidden', 'true');
 
   const previewDialog = document.createElement('div');
-  previewDialog.className = 'ns-modal-dialog github-preview-dialog';
+  previewDialog.className = 'press-modal-dialog github-preview-dialog';
   previewDialog.setAttribute('role', 'dialog');
   previewDialog.setAttribute('aria-modal', 'true');
 
@@ -4670,7 +6417,7 @@ function openGithubCommitFilePreview(file, triggerEl) {
   headLeft.appendChild(subtitle);
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
-  closeBtn.className = 'ns-modal-close btn-secondary';
+  closeBtn.className = 'press-modal-close btn-secondary';
   const closeLabel = t('editor.composer.dialogs.close');
   closeBtn.textContent = closeLabel;
   closeBtn.setAttribute('aria-label', closeLabel);
@@ -4679,50 +6426,44 @@ function openGithubCommitFilePreview(file, triggerEl) {
   previewDialog.appendChild(head);
   previewDialog.setAttribute('aria-labelledby', previewTitleId);
 
-  const body = document.createElement('div');
-  body.className = 'github-preview-body';
-  const pathLine = document.createElement('p');
-  pathLine.className = 'github-preview-path';
-  pathLine.textContent = file.path || file.label || '';
-  body.appendChild(pathLine);
-
-  const contentWrap = document.createElement('div');
-  contentWrap.className = 'github-preview-content';
-  if (file.kind === 'asset') {
+  if (file.deleted) {
+    const notice = document.createElement('p');
+    notice.className = 'github-preview-empty';
+    notice.textContent = `This publish will delete ${file.path || file.label || 'this file'}.`;
+    previewDialog.appendChild(notice);
+  } else if (file.kind === 'asset') {
     if (file.base64) {
       const mime = file.mime || 'application/octet-stream';
       const img = document.createElement('img');
       img.className = 'github-preview-image';
       img.alt = file.label || file.path || '';
       img.src = `data:${mime};base64,${file.base64}`;
-      contentWrap.appendChild(img);
+      previewDialog.appendChild(img);
       if (Number.isFinite(file.size)) {
         const meta = document.createElement('p');
         meta.className = 'github-preview-meta';
         const sizeKb = file.size > 0 ? (file.size / 1024).toFixed(1) : '0';
         meta.textContent = `${mime} · ${sizeKb} KB`;
-        body.appendChild(meta);
+        previewDialog.appendChild(meta);
       }
     } else {
       const notice = document.createElement('p');
       notice.className = 'github-preview-empty';
       notice.textContent = t('editor.composer.github.preview.unavailable');
-      contentWrap.appendChild(notice);
+      previewDialog.appendChild(notice);
     }
   } else if (typeof file.content === 'string') {
     const pre = document.createElement('pre');
     pre.className = 'github-preview-code';
     pre.textContent = file.content;
-    contentWrap.appendChild(pre);
+    previewDialog.appendChild(pre);
   } else {
     const notice = document.createElement('p');
     notice.className = 'github-preview-empty';
     notice.textContent = t('editor.composer.github.preview.unavailable');
-    contentWrap.appendChild(notice);
+    previewDialog.appendChild(notice);
   }
 
-  body.appendChild(contentWrap);
-  previewDialog.appendChild(body);
   previewModal.appendChild(previewDialog);
   document.body.appendChild(previewModal);
 
@@ -4731,7 +6472,7 @@ function openGithubCommitFilePreview(file, triggerEl) {
     try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
     catch (_) { return false; }
   })();
-  const hadModalOpen = document.body.classList.contains('ns-modal-open');
+  const hadModalOpen = document.body.classList.contains('press-modal-open');
   const restoreFocus = () => {
     if (!triggerEl || typeof triggerEl.focus !== 'function') return;
     try { triggerEl.focus({ preventScroll: true }); }
@@ -4742,17 +6483,17 @@ function openGithubCommitFilePreview(file, triggerEl) {
     closing = true;
     const finish = () => {
       try { previewModal.remove(); } catch (_) {}
-      if (!hadModalOpen) document.body.classList.remove('ns-modal-open');
+      if (!hadModalOpen) document.body.classList.remove('press-modal-open');
       restoreFocus();
     };
     if (reduceMotion) { finish(); return; }
     try {
-      previewModal.classList.remove('ns-anim-in');
-      previewModal.classList.add('ns-anim-out');
+      previewModal.classList.remove('press-anim-in');
+      previewModal.classList.add('press-anim-out');
     } catch (_) {}
     const onEnd = () => {
       previewDialog.removeEventListener('animationend', onEnd);
-      try { previewModal.classList.remove('ns-anim-out'); } catch (_) {}
+      try { previewModal.classList.remove('press-anim-out'); } catch (_) {}
       finish();
     };
     try {
@@ -4761,15 +6502,15 @@ function openGithubCommitFilePreview(file, triggerEl) {
     } catch (_) { onEnd(); }
   };
 
-  document.body.classList.add('ns-modal-open');
+  document.body.classList.add('press-modal-open');
   previewModal.classList.add('is-open');
   previewModal.setAttribute('aria-hidden', 'false');
   if (!reduceMotion) {
     try {
-      previewModal.classList.add('ns-anim-in');
+      previewModal.classList.add('press-anim-in');
       const onEnd = () => {
         previewDialog.removeEventListener('animationend', onEnd);
-        try { previewModal.classList.remove('ns-anim-in'); } catch (_) {}
+        try { previewModal.classList.remove('press-anim-in'); } catch (_) {}
       };
       previewDialog.addEventListener('animationend', onEnd, { once: true });
     } catch (_) {}
@@ -4850,6 +6591,25 @@ function appendGithubCommitSummary(summaryBlock, commitFiles = [], seoFiles = []
   }
 }
 
+function appendPublishTransportStatus(host) {
+  const transport = resolvePublishTransport();
+  const note = document.createElement('p');
+  note.className = 'muted sync-publish-transport';
+  if (transport.type === 'connect') {
+    if (transport.invalid) {
+      note.textContent = t('editor.composer.github.modal.connectInvalidUrl');
+    } else {
+      const cached = getCachedConnectPublishGrant();
+      note.textContent = cached
+        ? t('editor.composer.github.modal.connectConnected')
+        : t('editor.composer.github.modal.connectReady');
+    }
+  } else {
+    note.textContent = t('editor.composer.github.modal.subtitle');
+  }
+  host.appendChild(note);
+}
+
 function getSyncCommitPanelHost() {
   const syncPanel = document.getElementById('mode-sync');
   if (!syncPanel) return null;
@@ -4916,6 +6676,7 @@ async function refreshSyncCommitPanel(options = {}) {
 
   const summaryBlock = document.createElement('div');
   summaryBlock.className = 'sync-commit-summary';
+  appendPublishTransportStatus(form);
   appendGithubCommitSummary(summaryBlock, commitFiles, seoFiles, summaryEntries);
   form.appendChild(summaryBlock);
 
@@ -4935,23 +6696,44 @@ async function refreshSyncCommitPanel(options = {}) {
       refreshSyncCommitPanel();
       return;
     }
-    const input = document.getElementById('syncGithubTokenInput');
-    const value = getFineGrainedTokenValue();
-    if (!value) {
-      showError(t('editor.composer.github.modal.errorRequired'));
-      if (input && input.offsetParent) {
-        try { input.focus({ preventScroll: true }); }
-        catch (_) { input.focus(); }
+    const transport = resolvePublishTransport();
+    if (transport.type === 'pat') {
+      const input = document.getElementById('syncGithubTokenInput');
+      const value = getFineGrainedTokenValue();
+      if (!value) {
+        showError(t('editor.composer.github.modal.errorRequired'));
+        if (input && input.offsetParent) {
+          try { input.focus({ preventScroll: true }); }
+          catch (_) { input.focus(); }
+        }
+        return;
       }
-      return;
+      setCachedFineGrainedToken(value);
+      transport.token = value;
+    } else {
+      if (transport.invalid || !transport.connect) {
+        showError(t('editor.composer.github.modal.connectInvalidUrl'));
+        const input = document.getElementById('syncConnectBaseUrlInput');
+        if (input && input.offsetParent) {
+          try { input.focus({ preventScroll: true }); }
+          catch (_) { input.focus(); }
+        }
+        return;
+      }
+      try {
+        await ensureConnectPublishGrant(transport.connect, getActiveSiteRepoConfig());
+      } catch (err) {
+        showError(err && err.message ? err.message : t('editor.composer.github.modal.connectAuthorizationFailed'));
+        return;
+      }
     }
-    setCachedFineGrainedToken(value);
     if (btnSubmit) {
       btnSubmit.disabled = true;
       btnSubmit.setAttribute('aria-busy', 'true');
     }
     try {
-      await performDirectGithubCommit(value, currentSummary);
+      if (transport.type === 'connect') await performConnectGithubCommit(transport.connect, currentSummary);
+      else await performDirectGithubCommit(transport.token, currentSummary);
     } finally {
       if (btnSubmit) btnSubmit.removeAttribute('aria-busy');
       refreshSyncCommitPanel();
@@ -4986,7 +6768,7 @@ async function waitForRemotePropagation(files = []) {
 
   const normalizedRoot = (() => {
     try {
-      const root = (window.__ns_content_root || 'wwwroot').replace(/\\+/g, '/').replace(/^\/+|\/+$/g, '');
+      const root = (window.__press_content_root || 'wwwroot').replace(/\\+/g, '/').replace(/^\/+|\/+$/g, '');
       return root;
     } catch (_) {
       return 'wwwroot';
@@ -5068,45 +6850,69 @@ async function waitForRemotePropagation(files = []) {
     if (canceled || timedOut) break;
     const displayLabel = String(file.label || file.path || '').trim() || file.path;
     const expectedText = normalizeMarkdownContent(file.content || '');
-    const expectedBase64 = typeof file.base64 === 'string'
-      ? file.base64.replace(/\s+/g, '')
-      : '';
-    const candidates = buildCheckPaths(file);
-    let attempt = 0;
-    let confirmed = false;
-    while (!canceled && attempt < maxAttempts) {
-      attempt += 1;
-      setSyncOverlayStatus(`Checking ${displayLabel} (attempt ${attempt})…`);
-      let ok = false;
-      for (const path of candidates) {
-        if (!path) continue;
-        try {
-          const url = `${path}?ts=${Date.now()}`;
-          const resp = await fetch(url, { cache: 'no-store' });
-          if (!resp.ok) {
-            ok = false;
-            continue;
-          }
-          if (file.binary) {
-            const buffer = await resp.arrayBuffer();
-            const remoteBase64 = arrayBufferToBase64(buffer);
-            if (remoteBase64 && expectedBase64 && remoteBase64 === expectedBase64) {
-              ok = true;
-              break;
-            }
-          } else {
-            const text = normalizeMarkdownContent(await resp.text());
-            if (text === expectedText) {
-              ok = true;
-              break;
+      const expectedBase64 = typeof file.base64 === 'string'
+        ? file.base64.replace(/\s+/g, '')
+        : '';
+      const candidates = buildCheckPaths(file);
+      let attempt = 0;
+      let confirmed = false;
+      while (!canceled && attempt < maxAttempts) {
+        attempt += 1;
+        setSyncOverlayStatus(`Checking ${displayLabel} (attempt ${attempt})…`);
+        let ok = false;
+        if (file.deleted) {
+          let checked = false;
+          let stillExists = false;
+          let indeterminate = false;
+          for (const path of candidates) {
+            if (!path) continue;
+            try {
+              const url = `${path}?ts=${Date.now()}`;
+              const resp = await fetch(url, { cache: 'no-store' });
+              checked = true;
+              if (resp.ok) {
+                stillExists = true;
+                break;
+              }
+              if (resp.status !== 404 && resp.status !== 410) {
+                indeterminate = true;
+              }
+            } catch (_) {
+              indeterminate = true;
             }
           }
-        } catch (_) {
-          ok = false;
+          ok = checked && !stillExists && !indeterminate;
+        } else {
+          for (const path of candidates) {
+            if (!path) continue;
+            try {
+              const url = `${path}?ts=${Date.now()}`;
+              const resp = await fetch(url, { cache: 'no-store' });
+              if (!resp.ok) {
+                ok = false;
+                continue;
+              }
+              if (file.binary) {
+                const buffer = await resp.arrayBuffer();
+                const remoteBase64 = arrayBufferToBase64(buffer);
+                if (remoteBase64 && expectedBase64 && remoteBase64 === expectedBase64) {
+                  ok = true;
+                  break;
+                }
+              } else {
+                const text = normalizeMarkdownContent(await resp.text());
+                if (text === expectedText) {
+                  ok = true;
+                  break;
+                }
+              }
+            } catch (_) {
+              ok = false;
+            }
+          }
         }
-      }
-      if (canceled) break;
-      if (ok) {
+        if (canceled) break;
+        if (ok) {
         confirmed = true;
         break;
       }
@@ -5136,8 +6942,8 @@ async function waitForRemotePropagation(files = []) {
 
 function getActiveSiteRepoConfig() {
   const site = getStateSlice('site');
-  const fallback = window.__ns_site_repo && typeof window.__ns_site_repo === 'object'
-    ? window.__ns_site_repo
+  const fallback = window.__press_site_repo && typeof window.__press_site_repo === 'object'
+    ? window.__press_site_repo
     : {};
   return resolveSiteRepoConfig(site, composerSiteLocalOverride, fallback);
 }
@@ -5146,6 +6952,7 @@ function applyLocalPostCommitState(files = []) {
   if (!Array.isArray(files) || !files.length) return;
   const handledMarkdown = new Set();
   let clearedSystem = false;
+  let clearedThemeManager = false;
   files.forEach((file) => {
     if (!file || !file.kind) return;
     if (file.kind === 'index') {
@@ -5179,28 +6986,67 @@ function applyLocalPostCommitState(files = []) {
         updateMarkdownPushButton(getActiveDynamicTab());
         updateMarkdownDiscardButton(getActiveDynamicTab());
         updateMarkdownSaveButton(getActiveDynamicTab());
+        updateMarkdownProtectionButton(getActiveDynamicTab());
       }
     } else if (file.kind === 'markdown') {
       const norm = normalizeRelPath(file.markdownPath || file.label || '');
       if (!norm) return;
       handledMarkdown.add(norm);
-      const text = normalizeMarkdownContent(file.content || '');
+      if (file.deleted) {
+        clearMarkdownDraftEntry(norm);
+        clearMarkdownAssetsForPath(norm);
+        const tab = findDynamicTabByPath(norm);
+        if (tab) {
+          tab.remoteContent = '';
+          tab.remoteSignature = computeTextSignature('');
+          tab.content = '';
+          tab.loaded = true;
+          tab.localDraft = null;
+          tab.draftConflict = false;
+          tab.isDirty = false;
+          setMarkdownProtectionState(tab, createMarkdownProtectionState());
+          setDynamicTabStatus(tab, {
+            state: 'missing',
+            checkedAt: Date.now(),
+            code: 404,
+            message: 'Deleted via Press'
+          });
+        }
+        updateComposerMarkdownDraftIndicators({ path: norm });
+        return;
+      }
+      const committedText = normalizeMarkdownContent(file.content || '');
       const tab = findDynamicTabByPath(norm);
-      const commitSignature = computeTextSignature(text);
+      const commitSignature = computeTextSignature(committedText);
+      const committedEnvelope = parseEncryptedMarkdownEnvelope(committedText);
+      const committedProtected = !!file.protected || committedEnvelope.encrypted;
       const checkedAt = Date.now();
       if (tab) {
+        const baselineText = committedProtected
+          ? normalizeMarkdownContent(file.plaintextContent || tab.content || '')
+          : committedText;
         const currentText = normalizeMarkdownContent(tab.content || '');
-        const hasNewerLocalContent = currentText !== text;
-        tab.remoteContent = text;
+        const hasNewerLocalContent = currentText !== baselineText;
+        tab.remoteContent = baselineText;
         tab.remoteSignature = commitSignature;
         tab.loaded = true;
+        if (committedProtected) {
+          setMarkdownProtectionState(tab, {
+            ...getMarkdownProtectionState(tab),
+            enabled: true,
+            encryptedRemote: true,
+            passwordChanged: false,
+            remoteSignature: commitSignature,
+            remoteCiphertext: committedEnvelope.ciphertext || ''
+          });
+        } else {
+          setMarkdownProtectionState(tab, createMarkdownProtectionState());
+        }
         if (hasNewerLocalContent) {
-          const saved = saveMarkdownDraftEntry(norm, tab.content, tab.remoteSignature, exportMarkdownAssetBucket(norm));
-          if (saved) {
-            tab.localDraft = { ...saved, manual: !!(tab.localDraft && tab.localDraft.manual) };
-          } else if (tab.localDraft) {
+          if (tab.localDraft) {
             tab.localDraft = { ...tab.localDraft, remoteSignature: tab.remoteSignature };
           }
+          scheduleMarkdownDraftSave(tab);
           updateDynamicTabDirtyState(tab, { autoSave: false });
           setDynamicTabStatus(tab, {
             state: 'existing',
@@ -5210,7 +7056,7 @@ function applyLocalPostCommitState(files = []) {
         } else {
           clearMarkdownDraftEntry(norm);
           clearMarkdownAssetsForPath(norm);
-          tab.content = text;
+          tab.content = baselineText;
           tab.localDraft = null;
           tab.draftConflict = false;
           tab.isDirty = false;
@@ -5218,7 +7064,7 @@ function applyLocalPostCommitState(files = []) {
           setDynamicTabStatus(tab, {
             state: 'existing',
             checkedAt,
-            message: 'Synchronized via NanoSite'
+            message: 'Synchronized via Press'
           });
         }
       } else {
@@ -5228,7 +7074,12 @@ function applyLocalPostCommitState(files = []) {
       updateComposerMarkdownDraftIndicators({ path: norm });
     }
     else if (file.kind === 'system') {
-      if (!clearedSystem) {
+      if (file.category === 'theme') {
+        if (!clearedThemeManager) {
+          clearThemeManagerState({ keepStatus: false, keepRegistryCache: true, keepSiteThemeFallback: true });
+          clearedThemeManager = true;
+        }
+      } else if (!clearedSystem) {
         clearSystemUpdateState({ keepStatus: false });
         clearedSystem = true;
       }
@@ -5237,10 +7088,14 @@ function applyLocalPostCommitState(files = []) {
       const norm = normalizeRelPath(file.markdownPath || '');
       if (!norm) return;
       const assetPath = normalizeRelPath(file.assetPath || '');
-      if (assetPath) removeMarkdownAsset(norm, assetPath);
+      if (assetPath) {
+        removeMarkdownAsset(norm, assetPath);
+        removeMarkdownAssetDeletion(norm, assetPath);
+      }
       else if (file.path) {
         const withoutRoot = file.path.replace(/^\/?(?:wwwroot\/)?/, '');
         removeMarkdownAsset(norm, normalizeRelPath(withoutRoot));
+        removeMarkdownAssetDeletion(norm, normalizeRelPath(withoutRoot));
       }
     }
   });
@@ -5248,9 +7103,24 @@ function applyLocalPostCommitState(files = []) {
   updateMarkdownPushButton(getActiveDynamicTab());
   updateMarkdownDiscardButton(getActiveDynamicTab());
   updateMarkdownSaveButton(getActiveDynamicTab());
+  updateMarkdownProtectionButton(getActiveDynamicTab());
 }
 
 async function performDirectGithubCommit(token, summaryEntries = []) {
+  return performPublishCommit({
+    type: 'pat',
+    token
+  }, summaryEntries);
+}
+
+async function performConnectGithubCommit(connect, summaryEntries = []) {
+  return performPublishCommit({
+    type: 'connect',
+    connect
+  }, summaryEntries);
+}
+
+async function performPublishCommit(transport, summaryEntries = []) {
   const { owner, name, branch } = getActiveSiteRepoConfig();
   if (!owner || !name) {
     throw new Error('GitHub repository information is missing in site.yaml.');
@@ -5273,50 +7143,12 @@ async function performDirectGithubCommit(token, summaryEntries = []) {
       return;
     }
 
-    const branchRef = branch.startsWith('refs/') ? branch : `refs/heads/${branch}`;
-    setSyncOverlayStatus('Fetching repository state…');
-    const headQuery = `
-      query($owner:String!, $name:String!, $ref:String!) {
-        repository(owner:$owner, name:$name) {
-          ref(qualifiedName:$ref) {
-            target {
-              ... on Commit { oid }
-            }
-          }
-        }
-      }
-    `;
-    const headData = await githubGraphqlRequest(token, headQuery, { owner, name, ref: branchRef });
-    const refInfo = headData && headData.repository && headData.repository.ref;
-    const expectedHeadOid = refInfo && refInfo.target && refInfo.target.oid;
-    if (!expectedHeadOid) throw new Error('Unable to resolve the branch head on GitHub.');
-
-    setSyncOverlayStatus('Encoding files…');
-    const additions = files.map((file) => {
-      const path = String(file.path || '').replace(/^\/+/, '');
-      if (file.base64) {
-        return { path, contents: String(file.base64) };
-      }
-      return { path, contents: encodeContentToBase64(file.content || '') };
-    });
-
-    const commitMutation = `
-      mutation($input: CreateCommitOnBranchInput!) {
-        createCommitOnBranch(input: $input) {
-          commit { oid }
-        }
-      }
-    `;
-    const headline = `chore: sync ${files.length === 1 ? 'draft' : 'drafts'} via NanoSite`;
-    const mutationInput = {
-      branch: { repositoryNameWithOwner: `${owner}/${name}`, branchName: branch },
-      message: { headline },
-      expectedHeadOid,
-      fileChanges: { additions }
-    };
-
-    setSyncOverlayStatus('Creating commit…');
-    await githubGraphqlRequest(token, commitMutation, { input: mutationInput });
+    const headline = `chore: sync ${files.length === 1 ? 'draft' : 'drafts'} via Press`;
+    if (transport && transport.type === 'connect') {
+      await createConnectPublishCommit(transport.connect, { owner, name, branch, headline, files });
+    } else {
+      await createFineGrainedTokenCommit(transport && transport.token, { owner, name, branch, headline, files });
+    }
 
     setSyncOverlayStatus('Updating editor state…');
     applyLocalPostCommitState(files);
@@ -5341,11 +7173,209 @@ async function performDirectGithubCommit(token, summaryEntries = []) {
       clearCachedFineGrainedToken();
       message = t('editor.toasts.githubTokenRejected');
     }
-    console.error('NanoSite GitHub commit failed', err);
+    console.error('Press GitHub commit failed', err);
     showToast('error', message, { duration: 5200 });
   } finally {
     gitHubCommitInFlight = false;
   }
+}
+
+async function createFineGrainedTokenCommit(token, { owner, name, branch, headline, files }) {
+  const branchRef = branch.startsWith('refs/') ? branch : `refs/heads/${branch}`;
+  setSyncOverlayStatus('Fetching repository state…');
+  const headQuery = `
+    query($owner:String!, $name:String!, $ref:String!) {
+      repository(owner:$owner, name:$name) {
+        ref(qualifiedName:$ref) {
+          target {
+            ... on Commit { oid }
+          }
+        }
+      }
+    }
+  `;
+  const headData = await githubGraphqlRequest(token, headQuery, { owner, name, ref: branchRef });
+  const refInfo = headData && headData.repository && headData.repository.ref;
+  const expectedHeadOid = refInfo && refInfo.target && refInfo.target.oid;
+  if (!expectedHeadOid) throw new Error('Unable to resolve the branch head on GitHub.');
+
+  setSyncOverlayStatus('Encoding files…');
+  const fileChanges = buildGithubFileChanges(files);
+  const commitMutation = `
+    mutation($input: CreateCommitOnBranchInput!) {
+      createCommitOnBranch(input: $input) {
+        commit { oid }
+      }
+    }
+  `;
+  const mutationInput = {
+    branch: { repositoryNameWithOwner: `${owner}/${name}`, branchName: branch },
+    message: { headline },
+    expectedHeadOid,
+    fileChanges
+  };
+
+  setSyncOverlayStatus('Creating commit…');
+  await githubGraphqlRequest(token, commitMutation, { input: mutationInput });
+}
+
+async function createConnectPublishCommit(connect, { owner, name, branch, headline, files }) {
+  if (!connect || !connect.baseUrl) {
+    throw new Error(t('editor.composer.github.modal.connectMissing'));
+  }
+  setSyncOverlayStatus(t('editor.composer.github.modal.connectAuthorizing'));
+  const grant = await ensureConnectPublishGrant(connect, { owner, name, branch });
+  const endpoint = new URL('/api/press/publish', connect.baseUrl);
+  const body = {
+    repository: { owner, name, branch },
+    contentRoot: getTrackedPublishContentRoot(),
+    message: { headline },
+    files: files.map(serializeConnectPublishFile)
+  };
+  setSyncOverlayStatus(t('editor.composer.github.modal.connectPublishing'));
+  let response = null;
+  let payload = null;
+  try {
+    response = await fetch(endpoint.href, {
+      method: 'POST',
+      referrerPolicy: 'unsafe-url',
+      headers: {
+        'Authorization': `Bearer ${grant.token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    payload = await response.json().catch(() => null);
+  } catch (err) {
+    const error = new Error(t('editor.composer.github.modal.connectNetworkError'));
+    error.cause = err;
+    throw error;
+  }
+  if (!response.ok || !payload || payload.ok === false) {
+    const error = new Error(payload && payload.error && payload.error.message
+      ? payload.error.message
+      : t('editor.composer.github.modal.connectPublishFailed'));
+    error.status = response.status;
+    error.response = payload;
+    if (response.status === 401) clearCachedConnectPublishGrant();
+    throw error;
+  }
+}
+
+function buildGithubFileChanges(files) {
+  const additions = files.filter((file) => !file.deleted).map((file) => {
+    const path = String(file.path || '').replace(/^\/+/, '');
+    if (file.base64) {
+      return { path, contents: String(file.base64) };
+    }
+    return { path, contents: encodeContentToBase64(file.content || '') };
+  });
+  const deletions = files.filter((file) => file && file.deleted).map((file) => ({
+    path: String(file.path || '').replace(/^\/+/, '')
+  })).filter((file) => file.path);
+  const fileChanges = {};
+  if (additions.length) fileChanges.additions = additions;
+  if (deletions.length) fileChanges.deletions = deletions;
+  if (!additions.length && !deletions.length) throw new Error('No file changes to commit.');
+  return fileChanges;
+}
+
+function serializeConnectPublishFile(file) {
+  const out = {
+    path: String(file.path || '').replace(/^\/+/, '')
+  };
+  if (file.kind) out.kind = file.kind;
+  if (file.deleted) {
+    out.deleted = true;
+    return out;
+  }
+  if (file.base64) {
+    out.base64 = String(file.base64 || '');
+    if (file.mime) out.mime = file.mime;
+    out.binary = true;
+  } else {
+    out.content = String(file.content || '');
+  }
+  return out;
+}
+
+async function ensureConnectPublishGrant(connect, repo) {
+  const cached = getCachedConnectPublishGrant();
+  if (cached
+    && cached.baseUrl === connect.baseUrl
+    && cached.owner === repo.owner
+    && cached.name === repo.name
+    && cached.branch === repo.branch) {
+    return cached;
+  }
+  return requestConnectPublishGrant(connect, repo);
+}
+
+function requestConnectPublishGrant(connect, repo) {
+  const startUrl = new URL('/github/press/start', connect.baseUrl);
+  startUrl.searchParams.set('origin', window.location.origin);
+  startUrl.searchParams.set('owner', repo.owner);
+  startUrl.searchParams.set('repo', repo.name);
+  startUrl.searchParams.set('branch', repo.branch || 'main');
+
+  const popupName = 'pressConnectPublish';
+  const popup = window.open('', popupName, 'popup,width=520,height=720');
+  if (!popup) {
+    return Promise.reject(new Error(t('editor.toasts.popupBlocked')));
+  }
+  const link = document.createElement('a');
+  link.href = startUrl.href;
+  link.target = popupName;
+  link.referrerPolicy = 'unsafe-url';
+  link.rel = 'opener';
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  const connectOrigin = new URL(connect.baseUrl).origin;
+  return new Promise((resolve, reject) => {
+    let timer = 0;
+    let closeTimer = 0;
+    const cleanup = () => {
+      window.removeEventListener('message', onMessage);
+      if (timer) window.clearTimeout(timer);
+      if (closeTimer) window.clearInterval(closeTimer);
+    };
+    const onMessage = (event) => {
+      if (!event || event.origin !== connectOrigin) return;
+      const data = event.data && typeof event.data === 'object' ? event.data : null;
+      if (!data || data.type !== CONNECT_PUBLISH_MESSAGE_TYPE) return;
+      cleanup();
+      if (!data.ok || !data.grant || !data.grant.token) {
+        reject(new Error(data.error && data.error.message ? data.error.message : t('editor.composer.github.modal.connectAuthorizationFailed')));
+        return;
+      }
+      const grant = {
+        ...data.grant,
+        baseUrl: connect.baseUrl,
+        owner: repo.owner,
+        name: repo.name,
+        branch: repo.branch || 'main'
+      };
+      setCachedConnectPublishGrant(grant);
+      resolve(grant);
+    };
+    window.addEventListener('message', onMessage);
+    closeTimer = window.setInterval(() => {
+      try {
+        if (!popup.closed) return;
+      } catch (_) {
+        return;
+      }
+      cleanup();
+      reject(new Error(t('editor.composer.github.modal.connectAuthorizationCanceled')));
+    }, 500);
+    timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(t('editor.composer.github.modal.connectAuthorizationTimedOut')));
+    }, 5 * 60 * 1000);
+  });
 }
 
 function computeOrderDiffDetails(kind) {
@@ -5588,7 +7618,7 @@ function renderComposerSiteInlineSummary(target, diff) {
 function updateComposerSiteInlineMeta(meta, options = {}) {
   if (!meta) return;
 
-  meta.__nsSiteMetaActive = true;
+  meta.__pressSiteMetaActive = true;
   try { meta.setAttribute('data-site-active', 'true'); } catch (_) {}
   if (meta.dataset) meta.dataset.kind = 'site';
 
@@ -5599,8 +7629,8 @@ function updateComposerSiteInlineMeta(meta, options = {}) {
 
   const openBtn = meta.querySelector('.composer-order-inline-open');
   if (openBtn) {
-    if (!meta.__nsSiteMetaButtonState) {
-      meta.__nsSiteMetaButtonState = {
+    if (!meta.__pressSiteMetaButtonState) {
+      meta.__pressSiteMetaButtonState = {
         hidden: openBtn.hidden,
         ariaHidden: openBtn.getAttribute('aria-hidden'),
         display: openBtn.style.display,
@@ -5633,8 +7663,8 @@ function refreshComposerInlineMeta(options = {}) {
     return;
   }
 
-  if (meta.__nsSiteMetaActive) {
-    const stored = meta.__nsSiteMetaButtonState || null;
+  if (meta.__pressSiteMetaActive) {
+    const stored = meta.__pressSiteMetaButtonState || null;
     const openBtn = meta.querySelector('.composer-order-inline-open');
     if (openBtn) {
       openBtn.disabled = stored ? !!stored.disabled : false;
@@ -5644,8 +7674,8 @@ function refreshComposerInlineMeta(options = {}) {
       if (stored && stored.ariaHidden != null) openBtn.setAttribute('aria-hidden', stored.ariaHidden);
       else openBtn.removeAttribute('aria-hidden');
     }
-    delete meta.__nsSiteMetaButtonState;
-    delete meta.__nsSiteMetaActive;
+    delete meta.__pressSiteMetaButtonState;
+    delete meta.__pressSiteMetaActive;
     try { meta.removeAttribute('data-site-active'); } catch (_) {}
   }
 }
@@ -5670,7 +7700,7 @@ function getComposerOrderHoverContainer(element) {
 
 function applyComposerOrderHover(container, key) {
   if (!container) return;
-  const state = container.__nsOrderHoverState || (container.__nsOrderHoverState = {});
+  const state = container.__pressOrderHoverState || (container.__pressOrderHoverState = {});
   const normalizedKey = typeof key === 'string' ? key : '';
   let svg = state.svg;
   if (!svg || !svg.isConnected) {
@@ -5718,7 +7748,7 @@ function applyComposerOrderHover(container, key) {
 function bindComposerOrderHover(element, key) {
   if (!element) return;
   const hoverKey = typeof key === 'string' ? key : (element.getAttribute && element.getAttribute('data-key')) || '';
-  const existing = element.__nsOrderHoverBound;
+  const existing = element.__pressOrderHoverBound;
   if (existing && existing.key === hoverKey) return;
   if (existing) {
     element.removeEventListener('mouseenter', existing.enter);
@@ -5740,7 +7770,7 @@ function bindComposerOrderHover(element, key) {
   element.addEventListener('mouseleave', handleLeave);
   element.addEventListener('focusin', handleEnter);
   element.addEventListener('focusout', handleLeave);
-  element.__nsOrderHoverBound = { key: hoverKey, enter: handleEnter, leave: handleLeave };
+  element.__pressOrderHoverBound = { key: hoverKey, enter: handleEnter, leave: handleLeave };
 }
 
 function buildOrderDiffItem(entry, side) {
@@ -5792,10 +7822,10 @@ function ensureComposerDiffModal() {
 
   const modal = document.createElement('div');
   modal.id = 'composerOrderModal';
-  modal.className = 'ns-modal composer-order-modal composer-diff-modal';
+  modal.className = 'press-modal composer-order-modal composer-diff-modal';
 
   const dialog = document.createElement('div');
-  dialog.className = 'ns-modal-dialog composer-order-dialog composer-diff-dialog';
+  dialog.className = 'press-modal-dialog composer-order-dialog composer-diff-dialog';
   dialog.setAttribute('role', 'dialog');
   dialog.setAttribute('aria-modal', 'true');
 
@@ -5808,7 +7838,7 @@ function ensureComposerDiffModal() {
   subtitle.className = 'composer-order-subtitle';
   subtitle.textContent = tComposerDiff('subtitle.default');
   const closeBtn = document.createElement('button');
-  closeBtn.className = 'ns-modal-close btn-secondary composer-order-close';
+  closeBtn.className = 'press-modal-close btn-secondary composer-order-close';
   closeBtn.type = 'button';
   closeBtn.setAttribute('aria-label', tComposerDiff('close'));
   closeBtn.textContent = tComposerDiff('close');
@@ -5983,17 +8013,17 @@ function ensureComposerDiffModal() {
     if (reduce) {
       modal.classList.remove('is-open');
       modal.setAttribute('aria-hidden', 'true');
-      document.body.classList.remove('ns-modal-open');
+      document.body.classList.remove('press-modal-open');
       try { lastActive && lastActive.focus(); } catch (_) {}
       return;
     }
-    try { modal.classList.remove('ns-anim-in'); } catch (_) {}
-    try { modal.classList.add('ns-anim-out'); } catch (_) {}
+    try { modal.classList.remove('press-anim-in'); } catch (_) {}
+    try { modal.classList.add('press-anim-out'); } catch (_) {}
     const finish = () => {
-      try { modal.classList.remove('ns-anim-out'); } catch (_) {}
+      try { modal.classList.remove('press-anim-out'); } catch (_) {}
       modal.classList.remove('is-open');
       modal.setAttribute('aria-hidden', 'true');
-      document.body.classList.remove('ns-modal-open');
+      document.body.classList.remove('press-modal-open');
       try { lastActive && lastActive.focus(); } catch (_) {}
     };
     try {
@@ -6324,7 +8354,7 @@ function ensureComposerDiffModal() {
       afterList.appendChild(item);
     });
 
-    const hoverState = viz.__nsOrderHoverState || {};
+    const hoverState = viz.__pressOrderHoverState || {};
     if (hoverState.activeLeft && !hoverState.activeLeft.isConnected) {
       try { hoverState.activeLeft.classList.remove('is-hovered'); } catch (_) {}
       hoverState.activeLeft = null;
@@ -6333,7 +8363,7 @@ function ensureComposerDiffModal() {
     hoverState.rightMap = rightMap;
     hoverState.svg = svg;
     hoverState.pathMap = null;
-    viz.__nsOrderHoverState = hoverState;
+    viz.__pressOrderHoverState = hoverState;
 
     const hasItems = beforeEntries.length || afterEntries.length;
     if (hasItems) {
@@ -6365,14 +8395,14 @@ function ensureComposerDiffModal() {
   function openModal(kind, initialTab = 'overview') {
     lastActive = document.activeElement;
     const reduce = prefersReducedMotion();
-    try { modal.classList.remove('ns-anim-out'); } catch (_) {}
+    try { modal.classList.remove('press-anim-out'); } catch (_) {}
     modal.classList.add('is-open');
     modal.setAttribute('aria-hidden', 'false');
-    document.body.classList.add('ns-modal-open');
+    document.body.classList.add('press-modal-open');
     if (!reduce) {
       try {
-        modal.classList.add('ns-anim-in');
-        const onEnd = () => { dialog.removeEventListener('animationend', onEnd); try { modal.classList.remove('ns-anim-in'); } catch (_) {}; };
+        modal.classList.add('press-anim-in');
+        const onEnd = () => { dialog.removeEventListener('animationend', onEnd); try { modal.classList.remove('press-anim-in'); } catch (_) {}; };
         dialog.addEventListener('animationend', onEnd, { once: true });
       } catch (_) {}
     }
@@ -6439,9 +8469,9 @@ function ensureComposerDiffModal() {
       btn.textContent = tComposerDiff(def.labelKey);
     });
   };
-  if (!modal.__nsLangBound) {
-    modal.__nsLangBound = true;
-    document.addEventListener('ns-editor-language-applied', refreshLocale);
+  if (!modal.__pressLangBound) {
+    modal.__pressLangBound = true;
+    document.addEventListener('press-editor-language-applied', refreshLocale);
   }
 
   return composerDiffModal;
@@ -6454,7 +8484,7 @@ function drawOrderDiffLines(state) {
   const { container, svg, connectors, leftMap, rightMap } = ctx;
   if (!container || !svg) return;
 
-  const hoverState = container.__nsOrderHoverState || (container.__nsOrderHoverState = {});
+  const hoverState = container.__pressOrderHoverState || (container.__pressOrderHoverState = {});
   hoverState.svg = svg;
   if (leftMap instanceof Map) hoverState.leftMap = leftMap;
   if (rightMap instanceof Map) hoverState.rightMap = rightMap;
@@ -6475,7 +8505,7 @@ function drawOrderDiffLines(state) {
   svg.setAttribute('width', width);
   svg.setAttribute('height', height);
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  const existingPathCache = (svg.__nsPathCache instanceof Map) ? svg.__nsPathCache : new Map();
+  const existingPathCache = (svg.__pressPathCache instanceof Map) ? svg.__pressPathCache : new Map();
   const nextPathCache = new Map();
 
   const offsetX = rect.left;
@@ -6651,7 +8681,7 @@ function drawOrderDiffLines(state) {
     }
   });
 
-  svg.__nsPathCache = nextPathCache;
+  svg.__pressPathCache = nextPathCache;
 
   hoverState.pathMap = pathMap;
   if (typeof hoverState.currentKey === 'string' && hoverState.currentKey) {
@@ -6736,22 +8766,22 @@ function ensureComposerOrderPreview(kind) {
   const title = meta ? meta.querySelector('.composer-order-inline-title') : null;
   const openBtn = meta ? meta.querySelector('.composer-order-inline-open') : null;
 
-  if (openBtn && !openBtn.__nsBound) {
-    openBtn.__nsBound = true;
+  if (openBtn && !openBtn.__pressBound) {
+    openBtn.__pressBound = true;
     openBtn.addEventListener('click', () => {
       const target = openBtn.dataset && openBtn.dataset.kind ? openBtn.dataset.kind : normalized;
       openComposerDiffModal(target, 'overview');
     });
   }
 
-  if (typeof ResizeObserver === 'function' && !host.__nsOrderResizeObserver) {
+  if (typeof ResizeObserver === 'function' && !host.__pressOrderResizeObserver) {
     try {
       const ro = new ResizeObserver(() => {
         const state = composerOrderPreviewState && composerOrderPreviewState[normalized];
         if (state) drawOrderDiffLines(state);
       });
       ro.observe(host);
-      host.__nsOrderResizeObserver = ro;
+      host.__pressOrderResizeObserver = ro;
     } catch (_) {}
   }
 
@@ -6872,7 +8902,7 @@ function updateComposerOrderPreview(kind, options = {}) {
   const hasDiffChanges = !!(diff && diff.hasChanges);
 
   if (host) {
-    const hoverState = host.__nsOrderHoverState || {};
+    const hoverState = host.__pressOrderHoverState || {};
     if (hoverState.activeLeft && !hoverState.activeLeft.isConnected) {
       try { hoverState.activeLeft.classList.remove('is-hovered'); } catch (_) {}
       hoverState.activeLeft = null;
@@ -6881,7 +8911,7 @@ function updateComposerOrderPreview(kind, options = {}) {
     hoverState.rightMap = rightMap;
     hoverState.svg = svg;
     if (!hasOrderChanges) hoverState.pathMap = null;
-    host.__nsOrderHoverState = hoverState;
+    host.__pressOrderHoverState = hoverState;
   }
 
   if (emptyNotice) {
@@ -6926,10 +8956,10 @@ function updateComposerOrderPreview(kind, options = {}) {
 
     if (svg) svg.style.display = 'none';
     if (host) {
-      const hoverState = host.__nsOrderHoverState || {};
+      const hoverState = host.__pressOrderHoverState || {};
       hoverState.pathMap = null;
       hoverState.currentKey = '';
-      host.__nsOrderHoverState = hoverState;
+      host.__pressOrderHoverState = hoverState;
       applyComposerOrderHover(host, '');
     }
     composerOrderPreviewState[normalized] = null;
@@ -6977,15 +9007,15 @@ function updateComposerOrderPreview(kind, options = {}) {
   composerOrderPreviewState[normalized] = state;
   if (svg) svg.style.display = state ? '' : 'none';
   if (!state && host) {
-    const hoverState = host.__nsOrderHoverState || {};
+    const hoverState = host.__pressOrderHoverState || {};
     hoverState.pathMap = null;
     hoverState.currentKey = '';
-    host.__nsOrderHoverState = hoverState;
+    host.__pressOrderHoverState = hoverState;
     applyComposerOrderHover(host, '');
   }
   if (state) {
-    if (host && host.__nsOrderHoverState && typeof host.__nsOrderHoverState.currentKey === 'string') {
-      applyComposerOrderHover(host, host.__nsOrderHoverState.currentKey);
+    if (host && host.__pressOrderHoverState && typeof host.__pressOrderHoverState.currentKey === 'string') {
+      applyComposerOrderHover(host, host.__pressOrderHoverState.currentKey);
     }
     drawOrderDiffLines(state);
     requestAnimationFrame(() => drawOrderDiffLines(state));
@@ -6996,7 +9026,7 @@ function updateComposerOrderPreview(kind, options = {}) {
 function observeComposerOrderRow(row, kind) {
   if (!row || typeof ResizeObserver !== 'function') return;
   const normalized = kind === 'tabs' ? 'tabs' : 'index';
-  const existing = row.__nsOrderResize;
+  const existing = row.__pressOrderResize;
   if (existing && existing.kind === normalized) return;
   try {
     if (existing && existing.observer) {
@@ -7008,7 +9038,7 @@ function observeComposerOrderRow(row, kind) {
       scheduleComposerOrderPreviewRelayout(normalized);
     });
     observer.observe(row);
-    row.__nsOrderResize = { observer, kind: normalized };
+    row.__pressOrderResize = { observer, kind: normalized };
   } catch (_) {}
 }
 
@@ -7077,11 +9107,14 @@ function notifyComposerChange(kind, options = {}) {
   else applyIndexDiffMarkers(diff);
   updateFileDirtyBadge(kind);
   if (!options.skipAutoSave) scheduleAutoDraft(kind);
+  if (kind === 'site') {
+    try { applyComposerEffectiveSiteConfig(getStateSlice('site') || {}); } catch (_) {}
+  }
 
   updateUnsyncedSummary();
   if ((kind === 'index' || kind === 'tabs') && composerOrderPreviewActiveKind === kind) updateComposerOrderPreview(kind);
   refreshEditorContentTree({
-    preserveStructure: currentMode && (isDynamicMode(currentMode) || currentMode === 'composer' || currentMode === 'updates' || currentMode === 'sync')
+    preserveStructure: currentMode && (isDynamicMode(currentMode) || currentMode === 'composer' || currentMode === 'themes' || currentMode === 'updates' || currentMode === 'sync')
   });
 }
 
@@ -7613,6 +9646,234 @@ function showComposerAddEntryPrompt(anchor, options) {
   });
 }
 
+let markdownProtectionPasswordDialogElements = null;
+
+function configureMarkdownPasswordInput(input) {
+  if (!input) return;
+  input.type = 'password';
+  input.autocomplete = 'off';
+  input.autocapitalize = 'none';
+  input.spellcheck = false;
+  input.setAttribute('spellcheck', 'false');
+  input.setAttribute('data-1p-ignore', 'true');
+  input.setAttribute('data-lpignore', 'true');
+}
+
+function ensureMarkdownProtectionPasswordDialogElements() {
+  if (markdownProtectionPasswordDialogElements) return markdownProtectionPasswordDialogElements;
+  if (typeof document === 'undefined') return null;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'composerMarkdownProtectionPasswordDialog';
+  overlay.className = 'composer-protection-modal';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.hidden = true;
+
+  const card = document.createElement('div');
+  card.className = 'composer-protection-card';
+
+  const title = document.createElement('h3');
+  title.className = 'composer-protection-title';
+  title.id = 'composerMarkdownProtectionPasswordTitle';
+  overlay.setAttribute('aria-labelledby', title.id);
+  card.appendChild(title);
+
+  const message = document.createElement('p');
+  message.className = 'composer-protection-message';
+  message.id = 'composerMarkdownProtectionPasswordMessage';
+  overlay.setAttribute('aria-describedby', message.id);
+  card.appendChild(message);
+
+  const passwordLabel = document.createElement('label');
+  passwordLabel.className = 'composer-protection-field';
+  passwordLabel.setAttribute('for', 'composerMarkdownProtectionPasswordInput');
+  const passwordText = document.createElement('span');
+  passwordText.className = 'composer-protection-label';
+  passwordText.textContent = t('editor.composer.markdown.protection.passwordLabel');
+  const passwordInput = document.createElement('input');
+  passwordInput.id = 'composerMarkdownProtectionPasswordInput';
+  passwordInput.className = 'composer-key-input composer-protection-input';
+  configureMarkdownPasswordInput(passwordInput);
+  passwordLabel.append(passwordText, passwordInput);
+  card.appendChild(passwordLabel);
+
+  const confirmLabel = document.createElement('label');
+  confirmLabel.className = 'composer-protection-field';
+  confirmLabel.setAttribute('for', 'composerMarkdownProtectionPasswordConfirm');
+  const confirmText = document.createElement('span');
+  confirmText.className = 'composer-protection-label';
+  confirmText.textContent = t('editor.composer.markdown.protection.confirmPasswordLabel');
+  const confirmInput = document.createElement('input');
+  confirmInput.id = 'composerMarkdownProtectionPasswordConfirm';
+  confirmInput.className = 'composer-key-input composer-protection-input';
+  configureMarkdownPasswordInput(confirmInput);
+  confirmLabel.append(confirmText, confirmInput);
+  card.appendChild(confirmLabel);
+
+  const error = document.createElement('div');
+  error.className = 'composer-key-error composer-protection-error';
+  error.id = 'composerMarkdownProtectionPasswordError';
+  error.setAttribute('role', 'alert');
+  card.appendChild(error);
+
+  const actions = document.createElement('div');
+  actions.className = 'composer-confirm-actions composer-protection-actions';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'btn-secondary composer-confirm-cancel';
+  cancelBtn.textContent = t('editor.composer.dialogs.cancel');
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.type = 'button';
+  confirmBtn.className = 'btn-secondary composer-confirm-confirm';
+  confirmBtn.textContent = t('editor.composer.dialogs.confirm');
+
+  actions.append(cancelBtn, confirmBtn);
+  card.appendChild(actions);
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+
+  markdownProtectionPasswordDialogElements = {
+    overlay,
+    title,
+    message,
+    passwordText,
+    passwordInput,
+    confirmLabel,
+    confirmText,
+    confirmInput,
+    error,
+    cancelBtn,
+    confirmBtn
+  };
+  return markdownProtectionPasswordDialogElements;
+}
+
+function requestMarkdownProtectionPassword(options = {}) {
+  const elements = ensureMarkdownProtectionPasswordDialogElements();
+  if (!elements) return Promise.resolve('');
+  const {
+    overlay,
+    title,
+    message,
+    passwordText,
+    passwordInput,
+    confirmLabel,
+    confirmText,
+    confirmInput,
+    error,
+    cancelBtn,
+    confirmBtn
+  } = elements;
+  const opts = options && typeof options === 'object' ? options : {};
+  const requireConfirm = opts.confirm === true;
+
+  title.textContent = opts.title ? String(opts.title) : t('editor.composer.markdown.protection.dialogTitle');
+  message.textContent = opts.message ? String(opts.message) : t('editor.composer.markdown.protection.dialogMessage');
+  passwordText.textContent = t('editor.composer.markdown.protection.passwordLabel');
+  confirmText.textContent = t('editor.composer.markdown.protection.confirmPasswordLabel');
+  confirmBtn.textContent = opts.confirmLabel ? String(opts.confirmLabel) : t('editor.composer.dialogs.confirm');
+  cancelBtn.textContent = opts.cancelLabel ? String(opts.cancelLabel) : t('editor.composer.dialogs.cancel');
+  passwordInput.value = '';
+  confirmInput.value = '';
+  error.textContent = '';
+  passwordInput.setAttribute('aria-invalid', 'false');
+  confirmInput.setAttribute('aria-invalid', 'false');
+  confirmLabel.hidden = !requireConfirm;
+
+  return new Promise((resolve) => {
+    let closed = false;
+
+    const setError = (text) => {
+      const value = String(text || '');
+      error.textContent = value;
+      passwordInput.setAttribute('aria-invalid', value ? 'true' : 'false');
+      confirmInput.setAttribute('aria-invalid', value && requireConfirm ? 'true' : 'false');
+    };
+
+    const finish = (value) => {
+      if (closed) return;
+      closed = true;
+      overlay.classList.remove('is-visible');
+      overlay.hidden = true;
+      passwordInput.value = '';
+      confirmInput.value = '';
+      setError('');
+      cancelBtn.removeEventListener('click', onCancel);
+      confirmBtn.removeEventListener('click', onConfirm);
+      passwordInput.removeEventListener('keydown', onKeyDown, true);
+      confirmInput.removeEventListener('keydown', onKeyDown, true);
+      overlay.removeEventListener('mousedown', onOverlayMouseDown, true);
+      document.removeEventListener('keydown', onDocumentKeyDown, true);
+      resolve(value ? String(value) : '');
+    };
+
+    const validate = () => {
+      const password = String(passwordInput.value || '');
+      const confirmation = String(confirmInput.value || '');
+      if (!password) {
+        setError(t('editor.composer.markdown.protection.passwordRequired'));
+        try { passwordInput.focus({ preventScroll: true }); } catch (_) {}
+        return '';
+      }
+      if (requireConfirm && password !== confirmation) {
+        setError(t('editor.composer.markdown.protection.passwordMismatch'));
+        try { confirmInput.focus({ preventScroll: true }); } catch (_) {}
+        return '';
+      }
+      setError('');
+      return password;
+    };
+
+    function onCancel(event) {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      finish('');
+    }
+
+    function onConfirm(event) {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      const password = validate();
+      if (!password) return;
+      finish(password);
+    }
+
+    function onKeyDown(event) {
+      if (!event) return;
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const password = validate();
+        if (!password) return;
+        finish(password);
+      }
+    }
+
+    function onDocumentKeyDown(event) {
+      if (!event) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        finish('');
+      }
+    }
+
+    function onOverlayMouseDown(event) {
+      if (event && event.target === overlay) finish('');
+    }
+
+    cancelBtn.addEventListener('click', onCancel);
+    confirmBtn.addEventListener('click', onConfirm);
+    passwordInput.addEventListener('keydown', onKeyDown, true);
+    confirmInput.addEventListener('keydown', onKeyDown, true);
+    overlay.addEventListener('mousedown', onOverlayMouseDown, true);
+    document.addEventListener('keydown', onDocumentKeyDown, true);
+
+    overlay.hidden = false;
+    overlay.classList.add('is-visible');
+    try { passwordInput.focus({ preventScroll: true }); } catch (_) {}
+  });
+}
+
 function ensureComposerDiscardConfirmElements() {
   if (discardConfirmElements) return discardConfirmElements;
   if (typeof document === 'undefined') return null;
@@ -7953,7 +10214,7 @@ async function handleComposerDiscard(btn) {
 
 function getPrimaryEditorApi() {
   try {
-    const api = window.__ns_primary_editor;
+    const api = window.__press_primary_editor;
     return api && typeof api === 'object' ? api : null;
   } catch (_) {
     return null;
@@ -8114,12 +10375,20 @@ function extractVersionFromPath(relPath) {
 
 function getContentRootSafe() {
   try {
-    const root = window.__ns_content_root;
+    const root = window.__press_content_root;
     if (root && typeof root === 'string' && root.trim()) {
       return root.trim().replace(/[\\]/g, '/').replace(/\/?$/, '');
     }
   } catch (_) {}
   return 'wwwroot';
+}
+
+function getTrackedPublishContentRoot() {
+  const site = getStateSlice('site') || {};
+  const root = safeString(site.contentRoot || 'wwwroot')
+    .replace(/[\\]/g, '/')
+    .replace(/\/+$/g, '');
+  return root || 'wwwroot';
 }
 
 function computeBaseDirForPath(relPath) {
@@ -8229,7 +10498,7 @@ function scrollEditorContentToTop(behavior = 'smooth') {
 function persistSystemTreeExpandedState() {
   try {
     window.localStorage.setItem(
-      LS_KEYS.systemTreeExpanded,
+      scopedEditorStorageKey(LS_KEYS.systemTreeExpanded),
       expandedEditorTreeNodeIds.has('system') ? '1' : '0'
     );
   } catch (_) {}
@@ -8276,6 +10545,7 @@ function getEditorContentScrollKey(mode = currentMode) {
     return path ? `markdown:${path}` : 'markdown';
   }
   if (mode === 'composer') return 'composer';
+  if (mode === 'themes') return 'themes';
   if (mode === 'updates') return 'updates';
   if (mode === 'sync') return 'sync';
   return 'structure';
@@ -8368,9 +10638,10 @@ function bindEditorStatePersistenceListeners() {
 
 function mountEditorSystemPanels() {
   const body = document.getElementById('editorSystemBody');
-  if (!body || body.__nsSystemPanelsMounted) return;
-  body.__nsSystemPanelsMounted = true;
+  if (!body || body.__pressSystemPanelsMounted) return;
+  body.__pressSystemPanelsMounted = true;
   const composerPanel = document.getElementById('mode-composer');
+  const themesPanel = document.getElementById('mode-themes');
   const updatesPanel = document.getElementById('mode-updates');
   let syncPanel = document.getElementById('mode-sync');
   if (!syncPanel) {
@@ -8381,6 +10652,7 @@ function mountEditorSystemPanels() {
     syncPanel.setAttribute('aria-hidden', 'true');
   }
   if (composerPanel) body.appendChild(composerPanel);
+  if (themesPanel) body.appendChild(themesPanel);
   if (updatesPanel) body.appendChild(updatesPanel);
   if (syncPanel) body.appendChild(syncPanel);
 }
@@ -8402,22 +10674,22 @@ function animateEditorSystemPanelContent() {
   const panel = document.getElementById('editorSystemPanel');
   if (!panel) return;
   try {
-    const previousTimer = panel.__nsSystemAnimationTimer;
+    const previousTimer = panel.__pressSystemAnimationTimer;
     if (previousTimer) window.clearTimeout(previousTimer);
   } catch (_) {}
   panel.classList.remove('is-content-entering');
   try { panel.getBoundingClientRect(); } catch (_) {}
   panel.classList.add('is-content-entering');
   try {
-    panel.__nsSystemAnimationTimer = window.setTimeout(() => {
+    panel.__pressSystemAnimationTimer = window.setTimeout(() => {
       panel.classList.remove('is-content-entering');
-      panel.__nsSystemAnimationTimer = null;
+      panel.__pressSystemAnimationTimer = null;
     }, 260);
   } catch (_) {}
 }
 
 function showEditorSystemPanel(mode) {
-  const nextMode = mode === 'sync' ? 'sync' : (mode === 'updates' ? 'updates' : 'composer');
+  const nextMode = mode === 'sync' ? 'sync' : (mode === 'updates' ? 'updates' : (mode === 'themes' ? 'themes' : 'composer'));
   mountEditorSystemPanels();
   const panel = document.getElementById('editorSystemPanel');
   const title = document.getElementById('editorSystemTitle');
@@ -8425,9 +10697,11 @@ function showEditorSystemPanel(mode) {
   const meta = document.getElementById('editorSystemMeta');
   const actions = document.getElementById('editorSystemActions');
   const composerActions = document.getElementById('editorModalComposerActions');
+  const themeActions = document.getElementById('editorModalThemeActions');
   const updateActions = document.getElementById('editorModalUpdateActions');
   const syncActions = document.getElementById('editorModalSyncActions');
   const composerPanel = document.getElementById('mode-composer');
+  const themesPanel = document.getElementById('mode-themes');
   const updatesPanel = document.getElementById('mode-updates');
   const syncPanel = document.getElementById('mode-sync');
   if (!panel) return;
@@ -8438,20 +10712,25 @@ function showEditorSystemPanel(mode) {
     title.textContent = nextMode === 'sync'
       ? treeText('sync', 'Publish')
       : (nextMode === 'updates'
-        ? treeText('nanoSiteUpdates', 'NanoSite Updates')
-        : treeText('siteSettings', 'Site Settings'));
+        ? treeText('pressUpdates', 'Press Updates')
+        : (nextMode === 'themes'
+          ? treeText('themes', 'Themes')
+          : treeText('siteSettings', 'Site Settings')));
   }
   if (meta) {
     meta.textContent = nextMode === 'sync'
       ? treeText('syncMeta', 'Publish local changes to GitHub.')
       : (nextMode === 'updates'
-        ? treeText('systemUpdatesMeta', 'Review and apply NanoSite updates.')
-        : treeText('siteSettingsMeta', 'Edit site.yaml settings.'));
+        ? treeText('systemUpdatesMeta', 'Review and apply Press updates.')
+        : (nextMode === 'themes'
+          ? treeText('themesMeta', 'Theme packs.')
+          : treeText('siteSettingsMeta', 'Edit site.yaml settings.')));
   }
 
   if (actions) {
     [
       ['composer', composerActions],
+      ['themes', themeActions],
       ['updates', updateActions],
       ['sync', syncActions]
     ].forEach(([key, actionSet]) => {
@@ -8465,6 +10744,7 @@ function showEditorSystemPanel(mode) {
 
   [
     ['composer', composerPanel],
+    ['themes', themesPanel],
     ['updates', updatesPanel],
     ['sync', syncPanel]
   ].forEach(([key, modePanel]) => {
@@ -8489,6 +10769,7 @@ function showEditorSystemPanel(mode) {
 function getEditorOverlayTitle(mode) {
   if (mode === 'sync') return treeText('sync', 'Publish');
   if (mode === 'updates') return t('editor.systemUpdates.tabLabel');
+  if (mode === 'themes') return treeText('themes', 'Themes');
   return t('editor.modes.composer');
 }
 
@@ -8511,7 +10792,7 @@ function syncEditorOverlayUi() {
   }
 
   try {
-    document.body.classList.toggle('ns-editor-modal-open', hasOverlay);
+    document.body.classList.toggle('press-editor-modal-open', hasOverlay);
   } catch (_) {}
 }
 
@@ -8542,11 +10823,11 @@ function resetSiteSettingsNavOnOpen() {
     if (modalBody) modalBody.scrollTop = 0;
   } catch (_) {}
   const firstSectionId = (() => {
-    try { return String(root.__nsSiteFirstSectionId || '').trim(); }
+    try { return String(root.__pressSiteFirstSectionId || '').trim(); }
     catch (_) { return ''; }
   })();
   const setActive = (() => {
-    try { return typeof root.__nsSiteNavSetActive === 'function' ? root.__nsSiteNavSetActive : null; }
+    try { return typeof root.__pressSiteNavSetActive === 'function' ? root.__pressSiteNavSetActive : null; }
     catch (_) { return null; }
   })();
   if (!firstSectionId || !setActive) return;
@@ -8568,7 +10849,7 @@ function resetSiteSettingsNavOnOpen() {
 }
 
 function openEditorOverlay(mode, trigger = null) {
-  const nextMode = mode === 'updates' ? 'updates' : mode === 'composer' ? 'composer' : null;
+  const nextMode = mode === 'updates' ? 'updates' : (mode === 'themes' ? 'themes' : mode === 'composer' ? 'composer' : null);
   if (!nextMode) return;
   editorOverlayReturnFocus = trigger && typeof trigger.focus === 'function' ? trigger : document.activeElement;
   activeEditorOverlayMode = null;
@@ -8825,7 +11106,7 @@ function persistDynamicEditorState() {
       })
       .filter(Boolean);
     const active = currentMode && isDynamicMode(currentMode) ? dynamicEditorTabs.get(currentMode) : null;
-    const systemMode = (currentMode === 'composer' || currentMode === 'updates' || currentMode === 'sync')
+    const systemMode = (currentMode === 'composer' || currentMode === 'themes' || currentMode === 'updates' || currentMode === 'sync')
       ? currentMode
       : 'structure';
     const state = {
@@ -8844,7 +11125,7 @@ function persistDynamicEditorState() {
       state.activeLookupKey = active && (active.lookupKey || active.path) ? (active.lookupKey || active.path) : null;
       state.activePath = active && active.path ? active.path : null;
     }
-    store.setItem(LS_KEYS.editorState, JSON.stringify(state));
+    store.setItem(scopedEditorStorageKey(LS_KEYS.editorState), JSON.stringify(state));
   } catch (_) {}
 }
 
@@ -8853,7 +11134,7 @@ function restoreDynamicEditorState() {
   try {
     const store = window.localStorage;
     if (!store) return false;
-    raw = store.getItem(LS_KEYS.editorState);
+    raw = store.getItem(scopedEditorStorageKey(LS_KEYS.editorState));
   } catch (_) {
     return false;
   }
@@ -8929,6 +11210,10 @@ function restoreDynamicEditorState() {
     applyMode('composer', { preserveTreeExpansion: true, restoreScroll: true });
     return finishRestore('composer');
   }
+  if (isV3 && data.mode === 'themes') {
+    applyMode('themes', { preserveTreeExpansion: true, restoreScroll: true });
+    return finishRestore('themes');
+  }
   if (isV3 && data.mode === 'updates') {
     applyMode('updates', { preserveTreeExpansion: true, restoreScroll: true });
     return finishRestore('updates');
@@ -8965,7 +11250,7 @@ function updateMarkdownPushButton(tab) {
   const hasRepo = !!(repo.owner && repo.name);
 
   const active = (tab && tab.mode && tab.mode === currentMode) ? tab : getActiveDynamicTab();
-  const hasDraftContent = !!(active && active.localDraft && normalizeMarkdownContent(active.localDraft.content || ''));
+  const hasDraftContent = hasMarkdownDraftContent(active);
   const hasDirty = !!(active && active.isDirty);
   const hasLocalChanges = !!(active && active.path && (hasDirty || hasDraftContent));
 
@@ -9040,7 +11325,7 @@ function updateMarkdownDiscardButton(tab) {
   const active = (tab && tab.mode && tab.mode === currentMode) ? tab : getActiveDynamicTab();
   const hasBusy = btn.classList.contains('is-busy');
 
-  const hasDraftContent = !!(active && active.localDraft && normalizeMarkdownContent(active.localDraft.content || ''));
+  const hasDraftContent = hasMarkdownDraftContent(active);
   const dirty = !!(active && active.isDirty);
   const hasLocalChanges = !!(active && active.path && active.mode === currentMode && (dirty || hasDraftContent));
 
@@ -9121,7 +11406,47 @@ function updateMarkdownSaveButton(tab) {
   btn.setAttribute('aria-label', tooltip || getMarkdownSaveLabel());
 }
 
-function manualSaveActiveMarkdown(triggerButton) {
+function updateMarkdownProtectionButton(tab) {
+  if (!markdownProtectionButton) {
+    markdownProtectionButton = document.getElementById('btnProtectMarkdown');
+  }
+  if (!markdownProtectionButton) return;
+
+  const btn = markdownProtectionButton;
+  const active = (tab && tab.mode && tab.mode === currentMode) ? tab : getActiveDynamicTab();
+  const hasActive = !!(active && active.path && active.mode === currentMode);
+  const protectedState = hasActive && isMarkdownTabProtected(active);
+  const label = hasActive
+    ? getMarkdownProtectionLabel(active)
+    : t('editor.composer.markdown.protection.label');
+  const tooltip = hasActive
+    ? getMarkdownProtectionTooltip(active)
+    : t('editor.composer.markdown.protection.tooltipNoFile');
+  const switchEl = btn.closest ? btn.closest('.frontmatter-switch') : null;
+
+  btn.hidden = false;
+  btn.removeAttribute('aria-hidden');
+  btn.disabled = !hasActive;
+  if ('checked' in btn) btn.checked = protectedState;
+  btn.setAttribute('aria-disabled', hasActive ? 'false' : 'true');
+  btn.setAttribute('aria-checked', protectedState ? 'true' : 'false');
+  btn.setAttribute('data-protected', protectedState ? 'true' : 'false');
+  btn.dataset.state = protectedState ? 'on' : 'off';
+  btn.classList.toggle('is-protected', protectedState);
+  if (switchEl) {
+    switchEl.dataset.state = protectedState ? 'on' : 'off';
+    switchEl.classList.toggle('is-protected', protectedState);
+    switchEl.classList.toggle('is-disabled', !hasActive);
+    if (tooltip) switchEl.title = tooltip;
+    else switchEl.removeAttribute('title');
+  }
+  setButtonLabel(switchEl || btn, label);
+  if (tooltip) btn.title = tooltip;
+  else btn.removeAttribute('title');
+  btn.setAttribute('aria-label', tooltip || label);
+}
+
+async function manualSaveActiveMarkdown(triggerButton) {
   const active = getActiveDynamicTab();
   if (!active || !active.path) {
     showToast('info', getMarkdownSaveTooltip('noFile'));
@@ -9164,7 +11489,7 @@ function manualSaveActiveMarkdown(triggerButton) {
       active.markdownDraftTimer = null;
     }
 
-    const saved = saveMarkdownDraftForTab(active, { markManual: true });
+    const saved = await saveMarkdownDraftForTab(active, { markManual: true });
     if (saved) {
       pushEditorCurrentFileInfo(active);
       showToast('success', t('editor.composer.markdown.save.toastSuccess'));
@@ -9179,9 +11504,92 @@ function manualSaveActiveMarkdown(triggerButton) {
     updateMarkdownSaveButton(active);
     updateMarkdownDiscardButton(active);
     updateMarkdownPushButton(active);
+    updateMarkdownProtectionButton(active);
     try { updateUnsyncedSummary(); }
     catch (_) {}
   }
+}
+
+async function handleMarkdownProtectionButton(anchor) {
+  const active = getActiveDynamicTab();
+  if (!active || !active.path) {
+    showToast('info', t('editor.composer.markdown.protection.tooltipNoFile'));
+    updateMarkdownProtectionButton(null);
+    return;
+  }
+  const editorApi = getPrimaryEditorApi();
+  if (editorApi && typeof editorApi.getValue === 'function' && currentMode === active.mode) {
+    try { active.content = String(editorApi.getValue() || ''); } catch (_) {}
+  }
+  try {
+    if (active.pending) await active.pending;
+    else if (!active.loaded) await loadDynamicTabContent(active);
+  } catch (err) {
+    console.error('Failed to load markdown before changing protection', err);
+    showToast('error', t('editor.toasts.unableLoadLatestMarkdown'));
+    updateMarkdownProtectionButton(active);
+    return;
+  }
+
+  const currentProtection = getMarkdownProtectionState(active);
+  if (!currentProtection.enabled) {
+    const password = await requestMarkdownProtectionPassword({
+      title: t('editor.composer.markdown.protection.enableTitle'),
+      message: t('editor.composer.markdown.protection.enableMessage'),
+      confirmLabel: t('editor.composer.markdown.protection.enable'),
+      confirm: true
+    });
+    if (!password) return;
+    setMarkdownProtectionState(active, {
+      ...currentProtection,
+      enabled: true,
+      password,
+      passwordChanged: true
+    });
+    updateDynamicTabDirtyState(active);
+    updateMarkdownProtectionButton(active);
+    showToast('success', t('editor.composer.markdown.protection.enabledToast'));
+    return;
+  }
+
+  const changePassword = await showComposerDiscardConfirm(anchor, t('editor.composer.markdown.protection.changePrompt'), {
+    confirmLabel: t('editor.composer.markdown.protection.changePassword'),
+    cancelLabel: t('editor.composer.markdown.protection.disable')
+  });
+  if (changePassword) {
+    const password = await requestMarkdownProtectionPassword({
+      title: t('editor.composer.markdown.protection.changeTitle'),
+      message: t('editor.composer.markdown.protection.changeMessage'),
+      confirmLabel: t('editor.composer.markdown.protection.changePassword'),
+      confirm: true
+    });
+    if (!password) return;
+    setMarkdownProtectionState(active, {
+      ...currentProtection,
+      enabled: true,
+      password,
+      passwordChanged: true
+    });
+    updateDynamicTabDirtyState(active);
+    updateMarkdownProtectionButton(active);
+    showToast('success', t('editor.composer.markdown.protection.passwordChangedToast'));
+    return;
+  }
+
+  const disable = await showComposerDiscardConfirm(anchor, t('editor.composer.markdown.protection.disableConfirm'), {
+    confirmLabel: t('editor.composer.markdown.protection.disable'),
+    cancelLabel: t('editor.composer.dialogs.cancel')
+  });
+  if (!disable) return;
+  setMarkdownProtectionState(active, {
+    ...currentProtection,
+    enabled: false,
+    password: '',
+    passwordChanged: false
+  });
+  updateDynamicTabDirtyState(active);
+  updateMarkdownProtectionButton(active);
+  showToast('success', t('editor.composer.markdown.protection.disabledToast'));
 }
 
 async function openMarkdownPushOnGitHub(tab) {
@@ -9260,10 +11668,25 @@ async function openMarkdownPushOnGitHub(tab) {
     catch (_) {}
   }
 
-  try { nsCopyToClipboard(tab.content != null ? String(tab.content) : ''); }
+  const plaintextContent = normalizeMarkdownContent(tab.content != null ? String(tab.content) : '');
+  let preparedContent = '';
+  try {
+    const prepared = await prepareMarkdownForProtectedStorage(tab, plaintextContent, {
+      reason: 'github-edit'
+    });
+    preparedContent = prepared.content;
+  } catch (err) {
+    closePopupWindow(popup);
+    console.error('Failed to prepare protected markdown for GitHub edit', err);
+    showToast('error', t('editor.composer.markdown.protection.prepareFailed'));
+    updateMarkdownPushButton(tab);
+    return;
+  }
+
+  try { nsCopyToClipboard(preparedContent); }
   catch (_) {}
 
-  const expectedSignature = computeTextSignature(tab.content != null ? String(tab.content) : '');
+  const expectedSignature = computeTextSignature(preparedContent);
   const successMessage = isCreate
     ? t('editor.composer.markdown.toastCopiedCreate')
     : t('editor.composer.markdown.toastCopiedUpdate');
@@ -9275,6 +11698,7 @@ async function openMarkdownPushOnGitHub(tab) {
     startMarkdownSyncWatcher(tab, {
       expectedSignature,
       isCreate,
+      plaintextContent,
       label: filename || tab.path || t('editor.composer.markdown.fileFallback')
     });
   };
@@ -9296,6 +11720,7 @@ async function openMarkdownPushOnGitHub(tab) {
   }
 
   updateMarkdownPushButton(tab);
+  updateMarkdownProtectionButton(tab);
 }
 
 async function discardMarkdownLocalChanges(tab, anchor) {
@@ -9307,8 +11732,7 @@ async function discardMarkdownLocalChanges(tab, anchor) {
     return;
   }
 
-  flushMarkdownDraft(active);
-  const hasDraftContent = !!(active.localDraft && normalizeMarkdownContent(active.localDraft.content || ''));
+  const hasDraftContent = hasMarkdownDraftContent(active);
   const dirty = !!active.isDirty;
   if (!dirty && !hasDraftContent) {
     showToast('info', t('editor.toasts.noLocalMarkdownChanges'));
@@ -9378,6 +11802,8 @@ async function discardMarkdownLocalChanges(tab, anchor) {
     } catch (_) {}
 
     const baseline = normalizeMarkdownContent(active.remoteContent != null ? active.remoteContent : '');
+    const protection = getMarkdownProtectionState(active);
+    setMarkdownProtectionState(active, createDiscardedMarkdownProtectionState(protection));
     active.content = baseline;
     clearMarkdownDraftForTab(active);
     active.isDirty = false;
@@ -9435,6 +11861,7 @@ function pushEditorCurrentFileInfo(tab) {
   updateMarkdownPushButton(activeTab);
   updateMarkdownDiscardButton(activeTab);
   updateMarkdownSaveButton(activeTab);
+  updateMarkdownProtectionButton(activeTab);
 }
 
 function setDynamicTabStatus(tab, status) {
@@ -9474,7 +11901,7 @@ async function closeDynamicTab(modeId, options = {}) {
   if (!tab) return false;
 
   const opts = options && typeof options === 'object' ? options : {};
-  const hasLocalDraft = !!(tab.localDraft && normalizeMarkdownContent(tab.localDraft.content || ''));
+  const hasLocalDraft = hasMarkdownDraftContent(tab);
   const hasDirty = !!tab.isDirty;
 
   const resolveAnchor = (candidate) => {
@@ -9553,6 +11980,7 @@ async function closeDynamicTab(modeId, options = {}) {
   updateMarkdownPushButton(getActiveDynamicTab());
   updateMarkdownDiscardButton(getActiveDynamicTab());
   updateMarkdownSaveButton(getActiveDynamicTab());
+  updateMarkdownProtectionButton(getActiveDynamicTab());
   updateComposerMarkdownDraftIndicators({ path: tab.path });
   return true;
 }
@@ -9588,7 +12016,9 @@ function getOrCreateDynamicMode(path, options = {}) {
     localDraft: null,
     draftConflict: false,
     markdownDraftTimer: null,
+    markdownDraftSaveGeneration: 0,
     isDirty: false,
+    protection: createMarkdownProtectionState(),
     pendingAssets: ensureMarkdownAssetBucket(normalized)
   };
   restoreMarkdownDraftForTab(data);
@@ -9631,11 +12061,24 @@ async function loadDynamicTabContent(tab) {
     if (res.status === 404) {
       tab.remoteContent = '';
       tab.remoteSignature = computeTextSignature('');
-      tab.loaded = true;
-      if (!tab.localDraft || !tab.localDraft.content) {
+      if (tab.localDraft && tab.localDraft.encryptedContent) {
+        tab.content = await decryptProtectedMarkdownForTab(tab.localDraft.encryptedContent, tab, {
+          draft: true,
+          remote: false,
+          remoteSignature: tab.remoteSignature,
+          title: t('editor.composer.markdown.protection.draftTitle'),
+          message: t('editor.composer.markdown.protection.draftMessage')
+        });
+        tab.localDraft.content = tab.content;
+        tab.localDraft.decrypted = true;
+      } else if (tab.localDraft && draftHasAssetDeletions(tab.localDraft)) {
+        tab.content = normalizeMarkdownContent(tab.localDraft.content || '');
+      } else if (!tab.localDraft || !tab.localDraft.content) {
         const template = getDefaultMarkdownForPath(rel);
         tab.content = template || '';
+        setMarkdownProtectionState(tab, createMarkdownProtectionState());
       }
+      tab.loaded = true;
       setDynamicTabStatus(tab, {
         state: 'missing',
         checkedAt,
@@ -9659,12 +12102,38 @@ async function loadDynamicTabContent(tab) {
     }
 
     const text = normalizeMarkdownContent(await res.text());
-    tab.remoteContent = text;
-    tab.remoteSignature = computeTextSignature(text);
-    tab.loaded = true;
-    if (!tab.localDraft || !tab.localDraft.content) {
-      tab.content = text;
+    const remoteEnvelope = parseEncryptedMarkdownEnvelope(text);
+    const remoteSignature = computeTextSignature(text);
+    let editorText = text;
+    if (remoteEnvelope.encrypted) {
+      editorText = await decryptProtectedMarkdownForTab(text, tab, {
+        remote: true,
+        draft: false,
+        remoteSignature,
+        title: t('editor.composer.markdown.protection.openTitle'),
+        message: t('editor.composer.markdown.protection.openMessage')
+      });
+    } else if (!isMarkdownTabProtected(tab)) {
+      setMarkdownProtectionState(tab, createMarkdownProtectionState());
     }
+    tab.remoteContent = editorText;
+    tab.remoteSignature = remoteSignature;
+    if (tab.localDraft && tab.localDraft.encryptedContent) {
+      tab.content = await decryptProtectedMarkdownForTab(tab.localDraft.encryptedContent, tab, {
+        draft: true,
+        remote: false,
+        remoteSignature,
+        title: t('editor.composer.markdown.protection.draftTitle'),
+        message: t('editor.composer.markdown.protection.draftMessage')
+      });
+      tab.localDraft.content = tab.content;
+      tab.localDraft.decrypted = true;
+    } else if (tab.localDraft && draftHasAssetDeletions(tab.localDraft)) {
+      tab.content = normalizeMarkdownContent(tab.localDraft.content || '');
+    } else if (!tab.localDraft || !tab.localDraft.content) {
+      tab.content = editorText;
+    }
+    tab.loaded = true;
     setDynamicTabStatus(tab, {
       state: 'existing',
       checkedAt,
@@ -9674,7 +12143,15 @@ async function loadDynamicTabContent(tab) {
     return tab.content;
   };
 
-  tab.pending = runner().finally(() => {
+  tab.pending = runner().catch((err) => {
+    tab.loaded = false;
+    setDynamicTabStatus(tab, {
+      state: 'error',
+      checkedAt: Date.now(),
+      message: err && err.message ? err.message : 'Unable to load markdown'
+    });
+    throw err;
+  }).finally(() => {
     tab.pending = null;
   });
 
@@ -9742,8 +12219,9 @@ function applyMode(mode, options = {}) {
   }
 
   const candidate = mode || 'editor';
-  const isSystemMode = (value) => value === 'composer' || value === 'updates' || value === 'sync';
+  const isSystemMode = (value) => value === 'composer' || value === 'themes' || value === 'updates' || value === 'sync';
   const systemModeNodeId = (value) => {
+    if (value === 'themes') return 'system:themes';
     if (value === 'updates') return 'system:updates';
     if (value === 'sync') return 'system:sync';
     return 'system:site-settings';
@@ -9929,7 +12407,7 @@ function applyMode(mode, options = {}) {
 
 function getInitialComposerFile() {
   try {
-    const v = (localStorage.getItem(LS_KEYS.cfile) || '').toLowerCase();
+    const v = (localStorage.getItem(scopedEditorStorageKey(LS_KEYS.cfile)) || '').toLowerCase();
     if (v === 'site') return v;
   } catch (_) {}
   return 'site';
@@ -10343,7 +12821,11 @@ function toIndexYaml(data) {
     langs.forEach(lang => {
       const v = entry[lang];
       if (Array.isArray(v)) {
-        if (v.length <= 1) {
+        const hasMetadata = v.some(item => isIndexMetadataObject(item));
+        if (hasMetadata) {
+          lines.push(`  ${lang}:`);
+          writeYamlValue(lines, 2, v);
+        } else if (v.length <= 1) {
           const one = v[0] ?? '';
           lines.push(`  ${lang}: ${one ? one : '""'}`);
         } else {
@@ -10352,6 +12834,9 @@ function toIndexYaml(data) {
         }
       } else if (typeof v === 'string') {
         lines.push(`  ${lang}: ${v}`);
+      } else if (isIndexMetadataObject(v)) {
+        lines.push(`  ${lang}:`);
+        writeYamlValue(lines, 2, v);
       }
     });
   });
@@ -10493,7 +12978,7 @@ function makeDragList(container, onReorder) {
     li.style.willChange = 'transform, top, left';
     li.classList.add('dragging');
     container.classList.add('is-dragging-list');
-    document.body.classList.add('ns-noselect');
+    document.body.classList.add('press-noselect');
     document.body.appendChild(li);
 
     try { handle.setPointerCapture(e.pointerId); } catch (_) {}
@@ -10565,7 +13050,7 @@ function makeDragList(container, onReorder) {
     }
 
     container.classList.remove('is-dragging-list');
-    document.body.classList.remove('ns-noselect');
+    document.body.classList.remove('press-noselect');
     window.removeEventListener('pointermove', onPointerMove);
 
     const order = childItems().map(el => el.dataset.key);
@@ -10618,7 +13103,7 @@ function setEditorMarkdownPanelVisible(visible) {
 function setEditorDetailPanelMode(mode) {
   const showMarkdown = mode === 'markdown';
   const showStructure = mode === 'structure';
-  const showSystem = mode === 'composer' || mode === 'updates' || mode === 'sync';
+  const showSystem = mode === 'composer' || mode === 'themes' || mode === 'updates' || mode === 'sync';
   setEditorStructurePanelVisible(showStructure);
   setEditorMarkdownPanelVisible(showMarkdown);
   setEditorSystemPanelVisible(showSystem);
@@ -10628,16 +13113,16 @@ function setEditorDetailPanelMode(mode) {
 function animateEditorStructurePanelContent(panel) {
   if (!panel) return;
   try {
-    const previousTimer = panel.__nsStructureAnimationTimer;
+    const previousTimer = panel.__pressStructureAnimationTimer;
     if (previousTimer) window.clearTimeout(previousTimer);
   } catch (_) {}
   panel.classList.remove('is-content-entering');
   try { panel.getBoundingClientRect(); } catch (_) {}
   panel.classList.add('is-content-entering');
   try {
-    panel.__nsStructureAnimationTimer = window.setTimeout(() => {
+    panel.__pressStructureAnimationTimer = window.setTimeout(() => {
       panel.classList.remove('is-content-entering');
-      panel.__nsStructureAnimationTimer = null;
+      panel.__pressStructureAnimationTimer = null;
     }, 260);
   } catch (_) {}
 }
@@ -10646,16 +13131,16 @@ function animateEditorMarkdownPanelContent() {
   const panel = document.getElementById('editorMarkdownPanel');
   if (!panel) return;
   try {
-    const previousTimer = panel.__nsMarkdownAnimationTimer;
+    const previousTimer = panel.__pressMarkdownAnimationTimer;
     if (previousTimer) window.clearTimeout(previousTimer);
   } catch (_) {}
   panel.classList.remove('is-content-entering');
   try { panel.getBoundingClientRect(); } catch (_) {}
   panel.classList.add('is-content-entering');
   try {
-    panel.__nsMarkdownAnimationTimer = window.setTimeout(() => {
+    panel.__pressMarkdownAnimationTimer = window.setTimeout(() => {
       panel.classList.remove('is-content-entering');
-      panel.__nsMarkdownAnimationTimer = null;
+      panel.__pressMarkdownAnimationTimer = null;
     }, 260);
   } catch (_) {}
 }
@@ -10721,6 +13206,9 @@ function collectEditorDiffStatusMap() {
   try {
     if (getSystemUpdateSummaryEntries().length) add('system:updates', 'modified');
   } catch (_) {}
+  try {
+    if (getThemeManagerSummaryEntries().length) add('system:themes', 'modified');
+  } catch (_) {}
   return map;
 }
 
@@ -10733,7 +13221,8 @@ function buildCurrentEditorTree() {
     welcomeLabel: treeText('welcome', 'Welcome'),
     systemLabel: treeText('system', 'System'),
     siteSettingsLabel: treeText('siteSettings', 'Site Settings'),
-    updatesLabel: treeText('nanoSiteUpdates', 'NanoSite Updates'),
+    themesLabel: treeText('themes', 'Themes'),
+    updatesLabel: treeText('pressUpdates', 'Press Updates'),
     syncLabel: treeText('sync', 'Publish'),
     articlesLabel: treeText('articles', 'Articles'),
     pagesLabel: treeText('pages', 'Pages'),
@@ -10857,7 +13346,7 @@ function refreshEditorContentTree(options = {}) {
   const treeEl = document.getElementById('editorFileTree');
   if (!treeEl) return;
   const preserveStructure = !!options.preserveStructure
-    || !!(currentMode && (isDynamicMode(currentMode) || currentMode === 'composer' || currentMode === 'updates' || currentMode === 'sync'));
+    || !!(currentMode && (isDynamicMode(currentMode) || currentMode === 'composer' || currentMode === 'themes' || currentMode === 'updates' || currentMode === 'sync'));
   editorContentTree = buildCurrentEditorTree();
   if (!findEditorContentTreeNode(editorContentTree, activeEditorTreeNodeId)) activeEditorTreeNodeId = 'welcome';
   renderEditorFileTree(treeEl);
@@ -10881,6 +13370,9 @@ function createEditorTreeIcon(node) {
   if (node.id === 'system:site-settings') {
     iconKind = 'settings';
     iconSvg = '<svg viewBox="0 0 24 24" focusable="false"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"></path><circle cx="12" cy="12" r="3"></circle></svg>';
+  } else if (node.id === 'system:themes') {
+    iconKind = 'themes';
+    iconSvg = '<svg viewBox="0 0 24 24" focusable="false"><path d="M4 5h16"></path><path d="M4 12h16"></path><path d="M4 19h16"></path><path d="M7 5v14"></path><path d="M17 5v14"></path></svg>';
   } else if (node.id === 'system:updates') {
     iconKind = 'updates';
     iconSvg = '<svg viewBox="0 0 24 24" focusable="false"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path><path d="M8 16H3v5"></path></svg>';
@@ -11199,6 +13691,8 @@ function handleEditorTreeSelection(nodeId) {
     refreshEditorContentTree({ preserveStructure: true });
     if (node.id === 'system:site-settings') {
       applyMode('composer');
+    } else if (node.id === 'system:themes') {
+      applyMode('themes');
     } else if (node.id === 'system:updates') {
       applyMode('updates');
     } else if (node.id === 'system:sync') {
@@ -11238,7 +13732,7 @@ function handleEditorTreeSelection(nodeId) {
 }
 
 try {
-  document.addEventListener('ns-editor-current-file-breadcrumb-select', (event) => {
+  document.addEventListener('press-editor-current-file-breadcrumb-select', (event) => {
     const detail = event && event.detail && typeof event.detail === 'object' ? event.detail : {};
     const nodeId = String(detail.nodeId || '').trim();
     if (!nodeId) return;
@@ -11330,7 +13824,7 @@ function removeEditorLanguage(source, key, lang) {
 
 function addEditorVersion(key, lang, anchor = null) {
   const entry = getIndexEntry(key);
-  const arr = normalizeComposerVersionPaths(entry[lang]);
+  const arr = normalizeIndexVariantList(entry[lang]);
   return promptArticleVersionValue(key, lang, entry, anchor).then((version) => {
     if (!version) return false;
     arr.push(buildArticleVersionPath(key, lang, version, entry));
@@ -11346,7 +13840,7 @@ function addEditorVersion(key, lang, anchor = null) {
 
 function removeEditorVersion(key, lang, index) {
   const entry = getIndexEntry(key);
-  const arr = Array.isArray(entry[lang]) ? entry[lang] : [];
+  const arr = normalizeIndexVariantList(entry[lang]);
   if (!arr[index]) return;
   arr.splice(index, 1);
   entry[lang] = arr;
@@ -11397,13 +13891,13 @@ function restoreDeletedEditorTreeNode(node) {
   } else if (node.deletedKind === 'version') {
     const entry = ensureRestoredEntry('index', node.key, node.restoreOrderIndex);
     if (!entry || !node.lang) return false;
-    const path = normalizeRelPath(restoreValue || node.path);
+    const path = getIndexVariantLocation(restoreValue) || normalizeRelPath(node.path);
     if (!path) return false;
-    const arr = normalizeComposerVersionPaths(entry[node.lang]);
-    let targetIndex = arr.indexOf(path);
+    const arr = normalizeIndexVariantList(entry[node.lang]);
+    let targetIndex = arr.findIndex(item => getIndexVariantLocation(item) === path);
     if (targetIndex === -1) {
       targetIndex = normalizeRestoreIndex(node.restoreIndex, arr.length);
-      arr.splice(targetIndex, 0, path);
+      arr.splice(targetIndex, 0, isIndexMetadataObject(restoreValue) ? restoreValue : path);
     }
     entry[node.lang] = arr;
     nextNodeId = `index:${node.key}:${node.lang}:${targetIndex}`;
@@ -11431,7 +13925,7 @@ function moveEditorVersion(key, lang, index, delta) {
 
 function moveEditorVersionTo(key, lang, from, to) {
   const entry = getIndexEntry(key);
-  const arr = Array.isArray(entry[lang]) ? entry[lang] : [];
+  const arr = normalizeIndexVariantList(entry[lang]);
   if (from === to || from < 0 || to < 0 || from >= arr.length || to >= arr.length) return false;
   const [path] = arr.splice(from, 1);
   arr.splice(to, 0, path);
@@ -11669,8 +14163,8 @@ function appendEditorLanguageControl(body) {
   body.appendChild(item);
 
   try {
-    if (typeof window.__nsPopulateEditorLanguageSelect === 'function') window.__nsPopulateEditorLanguageSelect();
-    document.dispatchEvent(new CustomEvent('ns-editor-language-control-mounted'));
+    if (typeof window.__pressPopulateEditorLanguageSelect === 'function') window.__pressPopulateEditorLanguageSelect();
+    document.dispatchEvent(new CustomEvent('press-editor-language-control-mounted'));
   } catch (_) {}
 }
 
@@ -11747,8 +14241,8 @@ function makeWelcomeButton(label, targetNodeId, className = 'btn-secondary edito
 function renderWelcomeHero(refs) {
   refs.body.classList.add('editor-welcome-body');
   refs.kicker.textContent = welcomeText('kicker', 'Getting started');
-  refs.title.textContent = welcomeText('title', 'Welcome to NanoSite');
-  refs.meta.textContent = welcomeText('meta', 'Write content, check the site basics, and publish when everything looks ready.');
+  refs.title.textContent = welcomeText('title', 'Welcome to Press');
+  refs.meta.textContent = welcomeText('meta', 'Where knowledge becomes pages.');
 }
 
 function renderWelcomeStep(options) {
@@ -11838,7 +14332,7 @@ function renderWelcomeSecondaryActions() {
 
   const title = document.createElement('h3');
   title.className = 'editor-welcome-secondary-title';
-  title.textContent = welcomeText('updatesTitle', 'NanoSite Updates');
+  title.textContent = welcomeText('updatesTitle', 'Press Updates');
 
   const detail = document.createElement('p');
   detail.className = 'editor-welcome-secondary-detail';
@@ -11884,12 +14378,12 @@ function renderWelcomeFaq() {
   const list = document.createElement('div');
   list.className = 'editor-welcome-faq-list';
   [
-    ['faqNanoSiteQuestion', 'What is NanoSite?', 'faqNanoSiteAnswer', 'NanoSite turns Markdown files into a static website that can be hosted on GitHub Pages.', true],
+    ['faqPressQuestion', 'What is Press?', 'faqPressAnswer', 'Where knowledge becomes pages.', true],
     ['faqMarkdownQuestion', 'What is Markdown?', 'faqMarkdownAnswer', 'Markdown is a simple way to write headings, links, lists, images, and paragraphs as plain text.', false],
     ['faqArticlesPagesQuestion', 'What is the difference between Articles and Pages?', 'faqArticlesPagesAnswer', 'Articles are listed posts for blogs, notes, and tutorials. Pages are fixed navigation pages such as About or History.', false],
     ['faqFrontMatterQuestion', 'What is front matter?', 'faqFrontMatterAnswer', 'Front matter is the small settings block for a page or article, such as title, date, tags, excerpt, and cover image.', false],
     ['faqPublishQuestion', 'How do local edits and Publish work?', 'faqPublishAnswer', 'Saving keeps drafts on this computer. Publish sends the changes you choose to GitHub.', false],
-    ['faqUpdatesQuestion', 'What do NanoSite Updates change?', 'faqUpdatesAnswer', 'System Updates refresh editor and runtime files. They do not overwrite your articles, pages, or site settings.', false]
+    ['faqUpdatesQuestion', 'What do Press Updates change?', 'faqUpdatesAnswer', 'System Updates refresh editor and runtime files. They do not overwrite your articles, pages, or site settings.', false]
   ].forEach(([questionKey, questionFallback, answerKey, answerFallback, open]) => {
     list.appendChild(renderWelcomeFaqItem(
       welcomeText(questionKey, questionFallback),
@@ -11956,8 +14450,10 @@ function renderEditorStructurePanel(node) {
         const detail = child.id === 'system:sync'
           ? treeText('syncMeta', 'Publish local changes to GitHub.')
           : (child.id === 'system:updates'
-            ? treeText('systemUpdatesMeta', 'Review and apply NanoSite updates.')
-            : treeText('siteSettingsMeta', 'Edit site.yaml settings.'));
+            ? treeText('systemUpdatesMeta', 'Review and apply Press updates.')
+            : (child.id === 'system:themes'
+              ? treeText('themesMeta', 'Theme packs.')
+              : treeText('siteSettingsMeta', 'Edit site.yaml settings.')));
         list.appendChild(renderStructureItem(child.label, detail, () => handleEditorTreeSelection(child.id)));
       });
       body.appendChild(list);
@@ -12059,7 +14555,7 @@ function renderEditorEntryPanel(node, refs) {
   sortLangKeys(entry).forEach((lang) => {
     if (isPages) list.appendChild(renderPageLanguageStructure(node.key, lang, entry[lang]));
     else {
-      const arr = Array.isArray(entry[lang]) ? entry[lang] : (entry[lang] ? [entry[lang]] : []);
+      const arr = normalizeIndexVariantList(entry[lang]);
       list.appendChild(renderStructureItem(displayLangName(lang), `${arr.length} ${treeText('versions', 'versions')}`, () => handleEditorTreeSelection(`index:${node.key}:${lang}`)));
     }
   });
@@ -12107,7 +14603,7 @@ function renderPageLanguageStructure(key, lang, value) {
 
 function renderEditorLanguagePanel(node, refs) {
   const entry = getIndexEntry(node.key);
-  const arr = Array.isArray(entry[node.lang]) ? entry[node.lang] : (entry[node.lang] ? [entry[node.lang]] : []);
+  const arr = normalizeIndexVariantList(entry[node.lang]);
   entry[node.lang] = arr;
   refs.kicker.textContent = treeText('languageKicker', 'Article language');
   refs.title.textContent = `${node.key} / ${displayLangName(node.lang)}`;
@@ -12122,7 +14618,8 @@ function renderEditorLanguagePanel(node, refs) {
   const list = document.createElement('div');
   list.className = 'editor-structure-list';
   const dragController = createEditorStructureDragController(list, (fromIndex, toIndex) => moveEditorVersionTo(node.key, node.lang, fromIndex, toIndex));
-  arr.forEach((path, index) => {
+  arr.forEach((variant, index) => {
+    const path = getIndexVariantLocation(variant);
     const item = document.createElement('div');
     item.className = 'editor-structure-item editor-structure-item--draggable';
     item.dataset.index = String(index);
@@ -12136,12 +14633,16 @@ function renderEditorLanguagePanel(node, refs) {
     const controls = document.createElement('div');
     controls.className = 'editor-structure-item-actions';
     const open = makeStructureButton(treeText('open', 'Open'));
-    open.addEventListener('click', () => openMarkdownInEditor(arr[index], {
-      source: 'index',
-      key: node.key,
-      lang: node.lang,
-      editorTreeNodeId: `index:${node.key}:${node.lang}:${index}`
-    }));
+    open.addEventListener('click', () => {
+      const rel = getIndexVariantLocation(arr[index]);
+      if (!rel) return;
+      openMarkdownInEditor(rel, {
+        source: 'index',
+        key: node.key,
+        lang: node.lang,
+        editorTreeNodeId: `index:${node.key}:${node.lang}:${index}`
+      });
+    });
     const remove = makeStructureButton(treeText('remove', 'Remove'));
     remove.addEventListener('click', () => removeEditorVersion(node.key, node.lang, index));
     controls.appendChild(open);
@@ -12223,7 +14724,7 @@ function buildIndexUI(root, state) {
         const flagSpan = flag ? `<span class="ci-lang-flag" aria-hidden="true">${escapeHtml(flag)}</span>` : '';
         const val = entry[lang];
         // Normalize to array for UI
-        const arr = Array.isArray(val) ? val.slice() : (val ? [val] : []);
+        const arr = normalizeIndexVariantList(val);
         block.innerHTML = `
           <div class="ci-lang-head">
             <strong class="ci-lang-label" aria-label="${safeLabel}" title="${safeLabel}">
@@ -12291,13 +14792,13 @@ function buildIndexUI(root, state) {
             row.setAttribute('data-id', id);
             row.dataset.lang = lang;
             row.dataset.index = String(i);
-            row.dataset.value = p || '';
-            const normalizedPath = normalizeRelPath(p);
+            const normalizedPath = getIndexVariantLocation(p);
+            row.dataset.value = normalizedPath || '';
             if (normalizedPath) row.dataset.mdPath = normalizedPath;
             else delete row.dataset.mdPath;
             row.innerHTML = `
               <span class="ci-draft-indicator" aria-hidden="true" hidden></span>
-              <span class="ci-ver-label">${escapeHtml(extractVersionFromPath(p) || `${treeText('version', 'Version')} ${i + 1}`)}</span>
+              <span class="ci-ver-label">${escapeHtml(extractVersionFromPath(normalizedPath) || `${treeText('version', 'Version')} ${i + 1}`)}</span>
               <span class="ci-ver-actions">
                 <button type="button" class="btn-secondary ci-edit" title="${escapeHtml(openLabel)}">${escapeHtml(editLabel)}</button>
                 <button type="button" class="btn-secondary ci-up" title="${escapeHtml(moveUpLabel)}" aria-label="${escapeHtml(moveUpLabel)}"><span aria-hidden="true">↑</span></button>
@@ -12312,7 +14813,7 @@ function buildIndexUI(root, state) {
             if (i === arr.length - 1) down.setAttribute('disabled', ''); else down.removeAttribute('disabled');
             updateComposerMarkdownDraftIndicators({ element: row, path: normalizedPath });
             $('.ci-edit', row).addEventListener('click', () => {
-              const rel = normalizeRelPath(arr[i]);
+              const rel = getIndexVariantLocation(arr[i]);
               if (!rel) {
                 alert(tComposer('markdown.openBeforeEditor'));
                 return;
@@ -12381,8 +14882,8 @@ function buildIndexUI(root, state) {
         addLangWrap.className = 'ci-add-lang has-menu';
         addLangWrap.innerHTML = `
           <button type="button" class="btn-secondary ci-add-lang-btn" aria-haspopup="listbox" aria-expanded="false">${escapeHtml(addLangLabel)}</button>
-          <div class="ci-lang-menu ns-menu" role="listbox" hidden>
-            ${available.map(l => `<button type="button" role="option" class="ns-menu-item" data-lang="${l}">${escapeHtml(displayLangName(l))}</button>`).join('')}
+          <div class="ci-lang-menu press-menu" role="listbox" hidden>
+            ${available.map(l => `<button type="button" role="option" class="press-menu-item" data-lang="${l}">${escapeHtml(displayLangName(l))}</button>`).join('')}
           </div>
         `;
         const btn = $('.ci-add-lang-btn', addLangWrap);
@@ -12418,14 +14919,14 @@ function buildIndexUI(root, state) {
           btn.classList.add('is-open');
           addLangWrap.classList.add('is-open');
           btn.setAttribute('aria-expanded','true');
-          try { menu.querySelector('.ns-menu-item')?.focus(); } catch(_){}
+          try { menu.querySelector('.press-menu-item')?.focus(); } catch(_){}
           document.addEventListener('mousedown', onDocDown, true);
           document.addEventListener('keydown', onKeyDown, true);
         }
         function onDocDown(e){ if (!addLangWrap.contains(e.target)) closeMenu(); }
         function onKeyDown(e){ if (e.key === 'Escape') { e.preventDefault(); closeMenu(); } }
         btn.addEventListener('click', () => { btn.classList.contains('is-open') ? closeMenu() : openMenu(); });
-        menu.querySelectorAll('.ns-menu-item').forEach(it => {
+        menu.querySelectorAll('.press-menu-item').forEach(it => {
           it.addEventListener('click', () => {
             const code = String(it.getAttribute('data-lang')||'').trim();
             if (!code || entry[code]) return;
@@ -12591,8 +15092,8 @@ function buildTabsUI(root, state) {
         addLangWrap.className = 'ct-add-lang has-menu';
         addLangWrap.innerHTML = `
           <button type="button" class="btn-secondary ct-add-lang-btn" aria-haspopup="listbox" aria-expanded="false">${escapeHtml(addLangLabel)}</button>
-          <div class="ct-lang-menu ns-menu" role="listbox" hidden>
-            ${available.map(l => `<button type="button" role="option" class="ns-menu-item" data-lang="${escapeHtml(l)}">${escapeHtml(displayLangName(l))}</button>`).join('')}
+          <div class="ct-lang-menu press-menu" role="listbox" hidden>
+            ${available.map(l => `<button type="button" role="option" class="press-menu-item" data-lang="${escapeHtml(l)}">${escapeHtml(displayLangName(l))}</button>`).join('')}
           </div>
         `;
         const btn = $('.ct-add-lang-btn', addLangWrap);
@@ -12626,14 +15127,14 @@ function buildTabsUI(root, state) {
           btn.classList.add('is-open');
           addLangWrap.classList.add('is-open');
           btn.setAttribute('aria-expanded','true');
-          try { menu.querySelector('.ns-menu-item')?.focus(); } catch(_){}
+          try { menu.querySelector('.press-menu-item')?.focus(); } catch(_){}
           document.addEventListener('mousedown', onDocDown, true);
           document.addEventListener('keydown', onKeyDown, true);
         }
         function onDocDown(e){ if (!addLangWrap.contains(e.target)) closeMenu(); }
         function onKeyDown(e){ if (e.key === 'Escape') { e.preventDefault(); closeMenu(); } }
         btn.addEventListener('click', () => { btn.classList.contains('is-open') ? closeMenu() : openMenu(); });
-        menu.querySelectorAll('.ns-menu-item').forEach(it => {
+        menu.querySelectorAll('.press-menu-item').forEach(it => {
           it.addEventListener('click', () => {
             const code = String(it.getAttribute('data-lang')||'').trim();
             if (!code || entry[code]) return;
@@ -12714,8 +15215,8 @@ function normalizeComposerVersionTag(version) {
 }
 
 function normalizeComposerVersionPaths(value) {
-  if (Array.isArray(value)) return value.filter(path => !!normalizeRelPath(path));
-  const normalized = normalizeRelPath(value);
+  if (Array.isArray(value)) return value.map(item => getIndexVariantLocation(item)).filter(Boolean);
+  const normalized = getIndexVariantLocation(value);
   return normalized ? [normalized] : [];
 }
 
@@ -12762,9 +15263,11 @@ function pickComposerReferencePath(kind, entry, excludeLang) {
         path = value.location;
       }
     } else if (Array.isArray(value)) {
-      path = value.find(p => p && typeof p === 'string') || '';
+      path = value.map(item => getIndexVariantLocation(item)).find(Boolean) || '';
     } else if (typeof value === 'string') {
       path = value;
+    } else if (isIndexMetadataObject(value)) {
+      path = getIndexVariantLocation(value);
     }
     if (path) return { lang: code, path };
   }
@@ -12990,7 +15493,7 @@ function bindComposerUI(state) {
   $$('.mode-tab').forEach(btn => {
     btn.addEventListener('click', (event) => {
       const mode = btn.dataset.mode;
-      if (mode === 'composer' || mode === 'updates' || mode === 'sync') {
+      if (mode === 'composer' || mode === 'themes' || mode === 'updates' || mode === 'sync') {
         event.preventDefault();
         openEditorOverlay(mode, btn);
         return;
@@ -13003,6 +15506,26 @@ function bindComposerUI(state) {
   } catch (err) {
     console.error('Failed to initialize system updates module', err);
   }
+  try {
+    initThemeManager({
+      onStateChange: () => {
+        try { updateUnsyncedSummary(); } catch (_) {}
+        try { refreshEditorContentTree({ preserveStructure: true }); } catch (_) {}
+      },
+      getCurrentThemePack: () => {
+        const site = getStateSlice('site') || {};
+        return site.themePack || 'native';
+      },
+      setSiteThemePack: (value) => {
+        const site = getStateSlice('site') || {};
+        site.themePack = value || 'native';
+        setStateSlice('site', site);
+        notifyComposerChange('site');
+      }
+    });
+  } catch (err) {
+    console.error('Failed to initialize theme manager module', err);
+  }
 
   // File switch (index.yaml <-> tabs.yaml)
   const links = $$('a.vt-btn[data-cfile]');
@@ -13010,7 +15533,7 @@ function bindComposerUI(state) {
     applyComposerFile(name, options);
     try {
       const normalized = name === 'tabs' ? 'tabs' : (name === 'site' ? 'site' : 'index');
-      localStorage.setItem(LS_KEYS.cfile, normalized);
+      localStorage.setItem(scopedEditorStorageKey(LS_KEYS.cfile), normalized);
     } catch (_) {}
   };
   links.forEach(a => a.addEventListener('click', (e) => { e.preventDefault(); setFile(a.dataset.cfile); }));
@@ -13102,7 +15625,7 @@ function bindComposerUI(state) {
     }
 
     async function computeMissingFiles(preferredKind){
-      const contentRoot = (window.__ns_content_root || 'wwwroot').replace(/\\+/g,'/').replace(/\/?$/, '');
+      const contentRoot = (window.__press_content_root || 'wwwroot').replace(/\\+/g,'/').replace(/\/?$/, '');
       const out = [];
       const normalizedPreferred = normalizeTarget(preferredKind);
       const fallback = getActiveComposerFile();
@@ -13138,7 +15661,7 @@ function bindComposerUI(state) {
           const langs = sortLangKeys(langsObj);
           for (const lang of langs){
             const val = langsObj[lang];
-            const paths = Array.isArray(val) ? val.slice() : (typeof val === 'string' ? [val] : []);
+            const paths = normalizeComposerVersionPaths(val);
             for (const rel of paths){
               const url = `${contentRoot}/${String(rel||'')}`;
               tasks.push((async () => {
@@ -13160,14 +15683,14 @@ function bindComposerUI(state) {
     function openVerifyModal(missing, targetKind){
       // Build modal
       const modal = document.createElement('div');
-      modal.className = 'ns-modal'; modal.setAttribute('aria-hidden', 'true');
-      const dialog = document.createElement('div'); dialog.className = 'ns-modal-dialog'; dialog.setAttribute('role','dialog'); dialog.setAttribute('aria-modal','true');
+      modal.className = 'press-modal'; modal.setAttribute('aria-hidden', 'true');
+      const dialog = document.createElement('div'); dialog.className = 'press-modal-dialog'; dialog.setAttribute('role','dialog'); dialog.setAttribute('aria-modal','true');
       const head = document.createElement('div'); head.className = 'comp-guide-head';
       const left = document.createElement('div'); left.className='comp-head-left';
       const title = document.createElement('strong'); title.textContent = 'Verify Setup – Missing Files'; title.id='verifyTitle';
       const sub = document.createElement('span'); sub.className='muted'; sub.textContent = 'Create missing files on GitHub, then Verify again';
       left.appendChild(title); left.appendChild(sub);
-      const btnClose = document.createElement('button'); btnClose.className = 'ns-modal-close btn-secondary'; btnClose.type = 'button'; btnClose.textContent = 'Cancel'; btnClose.setAttribute('aria-label','Cancel');
+      const btnClose = document.createElement('button'); btnClose.className = 'press-modal-close btn-secondary'; btnClose.type = 'button'; btnClose.textContent = 'Cancel'; btnClose.setAttribute('aria-label','Cancel');
       head.appendChild(left); head.appendChild(btnClose);
       dialog.appendChild(head);
 
@@ -13225,7 +15748,7 @@ function bindComposerUI(state) {
               const p = document.createElement('code'); p.textContent = it.path; p.style.flex='1 1 auto'; row.appendChild(p);
               const actions = document.createElement('div'); actions.className='ci-ver-actions'; actions.style.display='inline-flex'; actions.style.gap='.35rem';
               const { owner, name, branch } = getActiveSiteRepoConfig();
-              const root = (window.__ns_content_root || 'wwwroot').replace(/\\+/g,'/').replace(/\/?$/, '');
+              const root = (window.__press_content_root || 'wwwroot').replace(/\\+/g,'/').replace(/\/?$/, '');
               const aNew = document.createElement('a');
               const canGh = !!(owner && name);
               aNew.className = canGh ? 'btn-secondary btn-github' : 'btn-secondary'; aNew.target='_blank'; aNew.rel='noopener';
@@ -13279,25 +15802,25 @@ function bindComposerUI(state) {
 
       function open(){
         const reduce = (function(){ try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch(_) { return false; } })();
-        try { modal.classList.remove('ns-anim-out'); } catch(_) {}
+        try { modal.classList.remove('press-anim-out'); } catch(_) {}
         modal.classList.add('is-open');
         modal.setAttribute('aria-hidden','false');
-        document.body.classList.add('ns-modal-open');
+        document.body.classList.add('press-modal-open');
         if (!reduce) {
           try {
-            modal.classList.add('ns-anim-in');
-            const onEnd = () => { try { modal.classList.remove('ns-anim-in'); } catch(_) {}; dialog.removeEventListener('animationend', onEnd); };
+            modal.classList.add('press-anim-in');
+            const onEnd = () => { try { modal.classList.remove('press-anim-in'); } catch(_) {}; dialog.removeEventListener('animationend', onEnd); };
             dialog.addEventListener('animationend', onEnd, { once: true });
           } catch(_) {}
         }
       }
       function close(){
         const reduce = (function(){ try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch(_) { return false; } })();
-        const done = () => { modal.classList.remove('is-open'); modal.setAttribute('aria-hidden','true'); document.body.classList.remove('ns-modal-open'); try { modal.remove(); } catch(_) {} };
+        const done = () => { modal.classList.remove('is-open'); modal.setAttribute('aria-hidden','true'); document.body.classList.remove('press-modal-open'); try { modal.remove(); } catch(_) {} };
         if (reduce) { done(); return; }
-        try { modal.classList.remove('ns-anim-in'); } catch(_) {}
-        try { modal.classList.add('ns-anim-out'); } catch(_) {}
-        const onEnd = () => { dialog.removeEventListener('animationend', onEnd); try { modal.classList.remove('ns-anim-out'); } catch(_) {}; done(); };
+        try { modal.classList.remove('press-anim-in'); } catch(_) {}
+        try { modal.classList.add('press-anim-out'); } catch(_) {}
+        const onEnd = () => { dialog.removeEventListener('animationend', onEnd); try { modal.classList.remove('press-anim-out'); } catch(_) {}; done(); };
         try {
           dialog.addEventListener('animationend', onEnd, { once: true });
           setTimeout(onEnd, 200);
@@ -13329,7 +15852,7 @@ function bindComposerUI(state) {
 
     async function afterAllGood(targetKind){
       // Compare current in-memory YAML vs remote file; open GitHub edit if differs
-      const contentRoot = (window.__ns_content_root || 'wwwroot').replace(/\\+/g,'/').replace(/\/?$/, '');
+      const contentRoot = (window.__press_content_root || 'wwwroot').replace(/\\+/g,'/').replace(/\/?$/, '');
       const fallback = getActiveComposerFile();
       const target = normalizeTarget(targetKind) || (fallback === 'tabs' ? 'tabs' : 'index');
       const desired = target === 'tabs' ? toTabsYaml(state.tabs || {}) : toIndexYaml(state.index || {});
@@ -13479,6 +16002,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       } finally {
         setBusyState(false, originalLabel);
         updateMarkdownPushButton(active);
+        updateMarkdownProtectionButton(active);
       }
     });
     updateMarkdownPushButton(getActiveDynamicTab());
@@ -13494,6 +16018,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateMarkdownSaveButton(getActiveDynamicTab());
   }
 
+  const protectBtn = document.getElementById('btnProtectMarkdown');
+  if (protectBtn) {
+    markdownProtectionButton = protectBtn;
+    protectBtn.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      handleMarkdownProtectionButton(protectBtn);
+    });
+    updateMarkdownProtectionButton(getActiveDynamicTab());
+  }
+
   const discardBtn = document.getElementById('btnDiscardMarkdown');
   if (discardBtn) {
     markdownDiscardButton = discardBtn;
@@ -13505,8 +16039,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   try {
-    if (!window.__ns_site_repo || typeof window.__ns_site_repo !== 'object') {
-      window.__ns_site_repo = { owner: '', name: '', branch: 'main' };
+    if (!window.__press_site_repo || typeof window.__press_site_repo !== 'object') {
+      window.__press_site_repo = { owner: '', name: '', branch: 'main' };
     }
   } catch (_) {}
 
@@ -13543,6 +16077,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   activeComposerState = state;
   const restoredDrafts = loadDraftSnapshotsIntoState(state);
+  let inferredSiteRepoApplied = false;
+  try {
+    inferredSiteRepoApplied = applyInferredRepoConfig(
+      state.site,
+      inferRepoConfigFromGitHubPagesUrl(window.location)
+    );
+  } catch (_) {
+    inferredSiteRepoApplied = false;
+  }
   applyComposerEffectiveSiteConfig(state.site);
   updateMarkdownPushButton(getActiveDynamicTab());
 
@@ -13561,7 +16104,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   notifyComposerChange('index', { skipAutoSave: true });
   notifyComposerChange('tabs', { skipAutoSave: true });
-  notifyComposerChange('site', { skipAutoSave: true });
+  notifyComposerChange('site', inferredSiteRepoApplied ? {} : { skipAutoSave: true });
 
   refreshEditorContentTree();
   const restoredEditorState = restoreDynamicEditorState();
@@ -13579,29 +16122,29 @@ function buildSiteUI(root, state) {
   if (!root) return;
   root.innerHTML = '';
   try {
-    if (typeof root.__nsSiteCompactNavCleanup === 'function') root.__nsSiteCompactNavCleanup();
+    if (typeof root.__pressSiteCompactNavCleanup === 'function') root.__pressSiteCompactNavCleanup();
   } catch (_) {}
-  try { root.__nsSiteCompactNavCleanup = null; } catch (_) {}
+  try { root.__pressSiteCompactNavCleanup = null; } catch (_) {}
   try {
-    if (typeof root.__nsSiteNavOrientationCleanup === 'function') root.__nsSiteNavOrientationCleanup();
+    if (typeof root.__pressSiteNavOrientationCleanup === 'function') root.__pressSiteNavOrientationCleanup();
   } catch (_) {}
-  try { root.__nsSiteNavOrientationCleanup = null; } catch (_) {}
+  try { root.__pressSiteNavOrientationCleanup = null; } catch (_) {}
   try {
-    if (typeof root.__nsSiteScrollSyncCleanup === 'function') root.__nsSiteScrollSyncCleanup();
+    if (typeof root.__pressSiteScrollSyncCleanup === 'function') root.__pressSiteScrollSyncCleanup();
   } catch (_) {}
-  try { root.__nsSiteScrollSyncCleanup = null; } catch (_) {}
+  try { root.__pressSiteScrollSyncCleanup = null; } catch (_) {}
   try {
-    if (typeof root.__nsSiteSingleLabelWidthCleanup === 'function') root.__nsSiteSingleLabelWidthCleanup();
+    if (typeof root.__pressSiteSingleLabelWidthCleanup === 'function') root.__pressSiteSingleLabelWidthCleanup();
   } catch (_) {}
-  try { root.__nsSiteSingleLabelWidthCleanup = null; } catch (_) {}
+  try { root.__pressSiteSingleLabelWidthCleanup = null; } catch (_) {}
   try {
-    if (typeof root.__nsSiteNavFocusHandler === 'function') root.removeEventListener('focusin', root.__nsSiteNavFocusHandler);
+    if (typeof root.__pressSiteNavFocusHandler === 'function') root.removeEventListener('focusin', root.__pressSiteNavFocusHandler);
   } catch (_) {}
-  try { root.__nsSiteNavFocusHandler = null; } catch (_) {}
-  try { root.__nsSiteNavRefresh = null; } catch (_) {}
-  try { root.__nsSiteNavSetActive = null; } catch (_) {}
-  try { root.__nsSiteFirstSectionId = null; } catch (_) {}
-  try { root.__nsSiteRevealField = null; } catch (_) {}
+  try { root.__pressSiteNavFocusHandler = null; } catch (_) {}
+  try { root.__pressSiteNavRefresh = null; } catch (_) {}
+  try { root.__pressSiteNavSetActive = null; } catch (_) {}
+  try { root.__pressSiteFirstSectionId = null; } catch (_) {}
+  try { root.__pressSiteRevealField = null; } catch (_) {}
   if (!state || typeof state !== 'object') return;
   let site = state.site;
   if (!site || typeof site !== 'object') {
@@ -13623,7 +16166,7 @@ function buildSiteUI(root, state) {
   })();
   const preservedActiveLabel = (() => {
     if (!rootHadVisibleLayout) return '';
-    try { return String(root.__nsSiteActiveSection || '').trim(); }
+    try { return String(root.__pressSiteActiveSection || '').trim(); }
     catch (_) { return ''; }
   })();
 
@@ -13759,7 +16302,7 @@ function buildSiteUI(root, state) {
         try { meta.section.removeAttribute('hidden'); } catch (_) {}
         meta.section.classList.add('is-active');
         meta.section.setAttribute('aria-hidden', 'false');
-        try { root.__nsSiteActiveSection = meta.label || ''; } catch (_) {}
+        try { root.__pressSiteActiveSection = meta.label || ''; } catch (_) {}
         if (options.focusPanel) {
           const focusable = meta.section.querySelector('[data-autofocus], input:not([type="hidden"]), select, textarea, button:not([type="hidden"]), [tabindex]:not([tabindex="-1"])');
           if (focusable && typeof focusable.focus === 'function') focusTarget = focusable;
@@ -14046,8 +16589,8 @@ function buildSiteUI(root, state) {
   };
 
   try { root.addEventListener('focusin', focusHandler); } catch (_) {}
-  try { root.__nsSiteNavFocusHandler = focusHandler; } catch (_) {}
-  try { root.__nsSiteRevealField = revealField; } catch (_) {}
+  try { root.__pressSiteNavFocusHandler = focusHandler; } catch (_) {}
+  try { root.__pressSiteRevealField = revealField; } catch (_) {}
 
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     const onScroll = () => scheduleScrollSync();
@@ -14084,13 +16627,13 @@ function buildSiteUI(root, state) {
       try { window.removeEventListener('resize', onResize); } catch (_) {}
       cancelScheduledScrollSync();
     };
-    try { root.__nsSiteScrollSyncCleanup = cleanup; }
+    try { root.__pressSiteScrollSyncCleanup = cleanup; }
     catch (_) { cleanup(); }
   }
 
-  try { root.__nsSiteNavRefresh = refreshNavDiffState; } catch (_) {}
-  try { root.__nsSiteNavSetActive = setActiveSection; } catch (_) {}
-  try { root.__nsSiteFirstSectionId = sectionsMeta[0] && sectionsMeta[0].id ? sectionsMeta[0].id : ''; } catch (_) {}
+  try { root.__pressSiteNavRefresh = refreshNavDiffState; } catch (_) {}
+  try { root.__pressSiteNavSetActive = setActiveSection; } catch (_) {}
+  try { root.__pressSiteFirstSectionId = sectionsMeta[0] && sectionsMeta[0].id ? sectionsMeta[0].id : ''; } catch (_) {}
 
   const markDirty = () => {
     setStateSlice('site', site);
@@ -14114,6 +16657,16 @@ function buildSiteUI(root, state) {
   const ensureRepo = () => {
     if (!site.repo || typeof site.repo !== 'object') site.repo = { owner: '', name: '', branch: '' };
     return site.repo;
+  };
+
+  const ensureAnnotate = () => {
+    if (!site.annotate || typeof site.annotate !== 'object') {
+      site.annotate = { enabled: null, connectBaseUrl: '', discussionCategory: '' };
+    }
+    if (!Object.prototype.hasOwnProperty.call(site.annotate, 'enabled')) site.annotate.enabled = null;
+    if (!Object.prototype.hasOwnProperty.call(site.annotate, 'connectBaseUrl')) site.annotate.connectBaseUrl = '';
+    if (!Object.prototype.hasOwnProperty.call(site.annotate, 'discussionCategory')) site.annotate.discussionCategory = '';
+    return site.annotate;
   };
 
   const ensureAssetWarnings = () => {
@@ -14306,7 +16859,7 @@ function buildSiteUI(root, state) {
     addWrap.appendChild(addBtn);
 
     const menu = document.createElement('div');
-    menu.className = 'ns-menu';
+    menu.className = 'press-menu';
     menu.setAttribute('role', 'listbox');
     menu.hidden = true;
     addWrap.appendChild(menu);
@@ -14353,7 +16906,7 @@ function buildSiteUI(root, state) {
 
       menu.innerHTML = available
         .map((code) =>
-          `<button type="button" role="option" class="ns-menu-item" data-lang="${escapeHtml(code)}">${escapeHtml(displayLangName(code))}</button>`
+          `<button type="button" role="option" class="press-menu-item" data-lang="${escapeHtml(code)}">${escapeHtml(displayLangName(code))}</button>`
         )
         .join('');
       if (!available.length) {
@@ -14407,10 +16960,10 @@ function buildSiteUI(root, state) {
       addBtn.classList.add('is-open');
       addWrap.classList.add('is-open');
       addBtn.setAttribute('aria-expanded', 'true');
-      try { menu.querySelector('.ns-menu-item')?.focus(); } catch (_) {}
+      try { menu.querySelector('.press-menu-item')?.focus(); } catch (_) {}
       document.addEventListener('mousedown', onDocDown, true);
       document.addEventListener('keydown', onKeyDown, true);
-      menu.querySelectorAll('.ns-menu-item').forEach((item) => {
+      menu.querySelectorAll('.press-menu-item').forEach((item) => {
         item.addEventListener('click', () => {
           const code = normalizeLangCode(item.getAttribute('data-lang'));
           if (!code) return;
@@ -14564,7 +17117,7 @@ function buildSiteUI(root, state) {
     addWrap.appendChild(addBtn);
 
     const menu = document.createElement('div');
-    menu.className = 'ns-menu';
+    menu.className = 'press-menu';
     menu.setAttribute('role', 'listbox');
     menu.hidden = true;
     addWrap.appendChild(menu);
@@ -14621,7 +17174,7 @@ function buildSiteUI(root, state) {
 
       menu.innerHTML = available
         .map((code) =>
-          `<button type="button" role="option" class="ns-menu-item" data-lang="${escapeHtml(code)}">${escapeHtml(displayLangName(code))}</button>`
+          `<button type="button" role="option" class="press-menu-item" data-lang="${escapeHtml(code)}">${escapeHtml(displayLangName(code))}</button>`
         )
         .join('');
       if (!available.length) {
@@ -14675,10 +17228,10 @@ function buildSiteUI(root, state) {
       addBtn.classList.add('is-open');
       addWrap.classList.add('is-open');
       addBtn.setAttribute('aria-expanded', 'true');
-      try { menu.querySelector('.ns-menu-item')?.focus(); } catch (_) {}
+      try { menu.querySelector('.press-menu-item')?.focus(); } catch (_) {}
       document.addEventListener('mousedown', onDocDown, true);
       document.addEventListener('keydown', onKeyDown, true);
-      menu.querySelectorAll('.ns-menu-item').forEach((item) => {
+      menu.querySelectorAll('.press-menu-item').forEach((item) => {
         item.addEventListener('click', () => {
           const code = normalizeLangCode(item.getAttribute('data-lang'));
           if (!code) return;
@@ -14905,7 +17458,7 @@ function buildSiteUI(root, state) {
         dataKey: 'avatar',
         label: t('editor.composer.site.fields.avatar'),
         description: t('editor.composer.site.fields.avatarHelp'),
-        placeholder: 'assets/avatar.jpeg',
+        placeholder: 'assets/avatar.png',
         get: () => site.avatar,
         set: (value) => { site.avatar = value; }
       },
@@ -15485,18 +18038,10 @@ function buildSiteUI(root, state) {
       }
       const nextValue = current && seen.has(current) ? current : firstOption || '';
       themePackSelect.value = nextValue;
-      const sanitized = sanitizeThemePackValue(nextValue);
-      if (sanitized && sanitized !== site.themePack) {
-        site.themePack = sanitized;
-        markDirty();
-      } else if (!sanitized && site.themePack) {
-        site.themePack = '';
-        markDirty();
-      }
     };
 
     applyThemePackOptions(fallbackThemePacks);
-    fetch('assets/themes/packs.json')
+    fetch('assets/themes/packs.json', { cache: 'no-store' })
       .then((response) => (response && response.ok ? response.json() : Promise.reject()))
       .then((list) => {
         if (!Array.isArray(list) || !normalizeThemePackList(list).length) throw new Error('empty theme pack list');
@@ -15505,6 +18050,18 @@ function buildSiteUI(root, state) {
       .catch(() => {
         applyThemePackOptions(fallbackThemePacks);
       });
+
+    const manageThemesRow = addThemeRow({
+      dataKey: 'manageThemes',
+      label: 'Manage themes',
+      description: 'Theme Manager.'
+    });
+    const manageThemesButton = document.createElement('button');
+    manageThemesButton.type = 'button';
+    manageThemesButton.className = 'btn-secondary';
+    manageThemesButton.textContent = 'Manage themes';
+    manageThemesButton.addEventListener('click', () => applyMode('themes'));
+    manageThemesRow.controlCell.appendChild(manageThemesButton);
 
     const { row, controlCell } = addThemeRow({
       dataKey: 'themeOverride',
@@ -15523,6 +18080,97 @@ function buildSiteUI(root, state) {
       markDirty();
     });
     syncSwitchState(checkbox, toggle, site.themeOverride, true);
+  };
+
+  const renderAnnotateGrid = (section) => {
+    const annotate = ensureAnnotate();
+    const { addRow } = createSingleGridFieldset(section);
+    const rows = [];
+    const addAnnotateRow = (item) => {
+      const row = addRow(item, rows.length);
+      rows.push(row);
+      return row;
+    };
+
+    const { row: enabledRow, controlCell: enabledControl } = addAnnotateRow({
+      dataKey: 'annotate',
+      label: t('editor.composer.site.fields.annotateEnabled'),
+      description: t('editor.composer.site.fields.annotateEnabledHelp'),
+      checkboxLabel: t('editor.composer.site.toggleEnabled')
+    });
+    const { toggle, checkbox } = createSwitchControl(
+      enabledRow,
+      t('editor.composer.site.toggleEnabled'),
+      {
+        target: enabledControl,
+        classes: ['cs-single-grid-switch']
+      }
+    );
+    toggle.dataset.field = 'annotate';
+    toggle.dataset.subfield = 'enabled';
+    checkbox.addEventListener('change', () => {
+      annotate.enabled = checkbox.checked;
+      syncSwitchState(checkbox, toggle, checkbox.checked, true);
+      markDirty();
+    });
+    syncSwitchState(checkbox, toggle, annotate.enabled, true);
+
+    const createTextRow = (item) => {
+      const { controlCell, controlId } = addAnnotateRow(item);
+      const input = document.createElement('input');
+      input.id = controlId;
+      input.type = item.type || 'text';
+      input.className = 'cs-input';
+      input.dataset.field = 'annotate';
+      input.dataset.subfield = item.subfield;
+      input.value = item.get() || '';
+      input.placeholder = item.placeholder || '';
+      if (item.listId) input.setAttribute('list', item.listId);
+      input.spellcheck = false;
+      input.autocomplete = 'off';
+      input.addEventListener('input', () => {
+        item.set(input.value);
+        markDirty();
+      });
+      controlCell.appendChild(input);
+      if (item.listId && Array.isArray(item.options)) {
+        const list = document.createElement('datalist');
+        list.id = item.listId;
+        item.options.forEach((entry) => {
+          const option = document.createElement('option');
+          option.value = entry.value;
+          option.label = entry.label || entry.value;
+          list.appendChild(option);
+        });
+        controlCell.appendChild(list);
+      }
+      return input;
+    };
+
+    createTextRow({
+      dataKey: 'annotate',
+      subfield: 'connectBaseUrl',
+      label: t('editor.composer.site.fields.annotateConnectBaseUrl'),
+      description: t('editor.composer.site.fields.annotateConnectBaseUrlHelp'),
+      type: 'url',
+      listId: 'siteAnnotateConnectBaseUrlPresets',
+      options: CONNECT_PUBLISH_PRESETS,
+      placeholder: CONNECT_PUBLISH_PRESETS[0].value,
+      get: () => annotate.connectBaseUrl,
+      set: (value) => { annotate.connectBaseUrl = value; }
+    });
+
+    createTextRow({
+      dataKey: 'annotate',
+      subfield: 'discussionCategory',
+      label: t('editor.composer.site.fields.annotateDiscussionCategory'),
+      description: t('editor.composer.site.fields.annotateDiscussionCategoryHelp'),
+      listId: 'siteAnnotateDiscussionCategoryPresets',
+      options: ANNOTATE_DISCUSSION_CATEGORY_PRESETS,
+      placeholder: 'General',
+      get: () => annotate.discussionCategory,
+      set: (value) => { annotate.discussionCategory = value; }
+    });
   };
 
   const renderAssetWarningsGrid = (section) => {
@@ -15971,7 +18619,7 @@ function buildSiteUI(root, state) {
     createRepoFieldGroup('cs-repo-field-group--branch', t('editor.composer.site.repoBranch'), branchWrap)
   );
   repoSection.appendChild(repoInputs);
-  renderFineGrainedTokenSettings(repoSection);
+  renderPublishTransportSettings(repoSection);
 
   const identitySection = createSection(
     t('editor.composer.site.sections.identity.title'),
@@ -16023,6 +18671,13 @@ function buildSiteUI(root, state) {
     t('editor.composer.site.sections.theme.description')
   );
   renderThemeGrid(themeSubsection);
+
+  const commentsSubsection = createConfigSubsection(
+    siteConfigSection,
+    t('editor.composer.site.sections.comments.title'),
+    t('editor.composer.site.sections.comments.description')
+  );
+  renderAnnotateGrid(commentsSubsection);
 
   const assetsSubsection = createConfigSubsection(
     siteConfigSection,
@@ -16121,23 +18776,23 @@ function rebuildSiteUI() {
   /* Button when open looks attached to menu */
   .ci-add-lang .btn-secondary.is-open,.ct-add-lang .btn-secondary.is-open{border-bottom-left-radius:0;border-bottom-right-radius:0;background:color-mix(in srgb, var(--text) 5%, var(--card));border-color:color-mix(in srgb, var(--primary) 45%, var(--border));border-bottom:0 !important}
   /* Custom menu popup */
-  .ns-menu{position:absolute;top:calc(100% - 1px);left:0;right:auto;z-index:101;border:1px solid var(--border);background:var(--card);box-shadow:var(--shadow);width:max-content;min-width:100%;max-width:min(320px,calc(100vw - 3rem));border-top:none;border-bottom-left-radius:8px;border-bottom-right-radius:8px;border-top-left-radius:0;border-top-right-radius:0;transform-origin: top left;}
-  .has-menu.is-open > .ns-menu{animation: ns-menu-in 160ms ease-out both}
-  @keyframes ns-menu-in{from{opacity:0; transform: translateY(-4px) scale(0.98);} to{opacity:1; transform: translateY(0) scale(1);} }
+  .press-menu{position:absolute;top:calc(100% - 1px);left:0;right:auto;z-index:101;border:1px solid var(--border);background:var(--card);box-shadow:var(--shadow);width:max-content;min-width:100%;max-width:min(320px,calc(100vw - 3rem));border-top:none;border-bottom-left-radius:8px;border-bottom-right-radius:8px;border-top-left-radius:0;border-top-right-radius:0;transform-origin: top left;}
+  .has-menu.is-open > .press-menu{animation: press-menu-in 160ms ease-out both}
+  @keyframes press-menu-in{from{opacity:0; transform: translateY(-4px) scale(0.98);} to{opacity:1; transform: translateY(0) scale(1);} }
   /* Closing animation */
-  .ns-menu.is-closing{animation: ns-menu-out 130ms ease-in both !important}
-  @keyframes ns-menu-out{from{opacity:1; transform: translateY(0) scale(1);} to{opacity:0; transform: translateY(-4px) scale(0.98);} }
-  .ns-menu .ns-menu-item{display:block;width:100%;text-align:left;background:transparent;color:var(--text);border:0 !important;border-bottom:0 !important;padding:.4rem .6rem;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .press-menu.is-closing{animation: press-menu-out 130ms ease-in both !important}
+  @keyframes press-menu-out{from{opacity:1; transform: translateY(0) scale(1);} to{opacity:0; transform: translateY(-4px) scale(0.98);} }
+  .press-menu .press-menu-item{display:block;width:100%;text-align:left;background:transparent;color:var(--text);border:0 !important;border-bottom:0 !important;padding:.4rem .6rem;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   /* Only draw a single divider: use top border on following items */
-  .ns-menu .ns-menu-item + .ns-menu-item{border-top:1px solid color-mix(in srgb, var(--text) 16%, var(--border))}
-  .ns-menu .ns-menu-item:hover{background:color-mix(in srgb, var(--text) 6%, var(--card))}
+  .press-menu .press-menu-item + .press-menu-item{border-top:1px solid color-mix(in srgb, var(--text) 16%, var(--border))}
+  .press-menu .press-menu-item:hover{background:color-mix(in srgb, var(--text) 6%, var(--card))}
   /* Make selects look like secondary buttons */
   .btn-like-select{appearance:none;-webkit-appearance:none;cursor:pointer;padding:.45rem .8rem;height:2.25rem;line-height:1}
   .btn-like-select:focus-visible{outline:2px solid color-mix(in srgb, var(--primary) 45%, transparent); outline-offset:2px}
   .dragging{opacity:.96}
   .drag-placeholder{border:1px dashed var(--border);border-radius:8px;background:transparent}
   .is-dragging-list{touch-action:none}
-  body.ns-noselect{user-select:none;cursor:grabbing}
+  body.press-noselect{user-select:none;cursor:grabbing}
   /* Simple badges for verify modal */
   .badge{display:inline-flex;align-items:center;gap:.25rem;border:1px solid var(--border);background:var(--card);color:var(--muted);font-size:.72rem;padding:.05rem .4rem;border-radius:999px}
   .badge-ver{ color: var(--primary); border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); }
@@ -16181,7 +18836,7 @@ function rebuildSiteUI() {
   .comp-guide-head{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem}
   .comp-guide-head .muted{color:var(--muted);font-size:.88rem}
   /* Titlebar-like header inside modal */
-  .ns-modal-dialog .comp-guide-head{
+  .press-modal-dialog .comp-guide-head{
     display:flex;align-items:center;justify-content:space-between;gap:.6rem;
     background: color-mix(in srgb, var(--text) 6%, var(--card));
     border-bottom: 1px solid color-mix(in srgb, var(--text) 12%, var(--border));
@@ -16192,9 +18847,9 @@ function rebuildSiteUI() {
     border-top-left-radius: 12px; border-top-right-radius: 12px;
     position: sticky; top: 0; z-index: 2;
   }
-  .ns-modal-dialog .comp-head-left{display:flex;align-items:baseline;gap:.6rem;min-width:0}
-  .ns-modal-dialog .comp-guide-head strong{font-weight:700}
-  .ns-modal-dialog .comp-guide-head .muted{opacity:.9}
+  .press-modal-dialog .comp-head-left{display:flex;align-items:baseline;gap:.6rem;min-width:0}
+  .press-modal-dialog .comp-guide-head strong{font-weight:700}
+  .press-modal-dialog .comp-guide-head .muted{opacity:.9}
   .comp-form{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;align-items:end;margin-bottom:.5rem}
   .comp-form label{display:flex;flex-direction:column;gap:.25rem;font-weight:600}
   .comp-form label{position:relative}
@@ -16244,51 +18899,51 @@ function rebuildSiteUI() {
   .comp-ok .comp-ok-text{font-size:.92rem; line-height:1.35}
   .btn-compact{height:1.9rem;padding:.2rem .55rem;font-size:.9rem}
   /* Unify button styles inside modal (anchors and buttons) */
-  .ns-modal-dialog .btn-secondary,
-  .ns-modal-dialog a.btn-secondary,
-  .ns-modal-dialog button.btn-secondary {
+  .press-modal-dialog .btn-secondary,
+  .press-modal-dialog a.btn-secondary,
+  .press-modal-dialog button.btn-secondary {
     display:inline-flex; align-items:center; justify-content:center; gap:.35rem;
     height:2.25rem; padding:.45rem .8rem; border-radius:8px; font-size:.93rem; line-height:1;
     text-decoration:none; border:1px solid var(--border); background:var(--card); color:var(--text);
   }
-  .ns-modal-dialog a.btn-secondary:visited { color: var(--text); }
-  .ns-modal-dialog .btn-secondary:hover { background: color-mix(in srgb, var(--text) 5%, var(--card)); }
+  .press-modal-dialog a.btn-secondary:visited { color: var(--text); }
+  .press-modal-dialog .btn-secondary:hover { background: color-mix(in srgb, var(--text) 5%, var(--card)); }
   /* GitHub green button variant (overrides theme packs) */
-  .ns-modal-dialog .btn-github,
-  .ns-modal-dialog a.btn-github,
-  .ns-modal-dialog button.btn-github {
+  .press-modal-dialog .btn-github,
+  .press-modal-dialog a.btn-github,
+  .press-modal-dialog button.btn-github {
     background:#428646 !important; color:#ffffff !important; border:1px solid #3d7741 !important; border-radius:8px !important;
   }
-  .ns-modal-dialog a.btn-github:visited { color:#ffffff !important; }
-  .ns-modal-dialog .btn-github:hover { background:#3d7741 !important; }
-  .ns-modal-dialog .btn-github:active { background:#298e46 !important; }
-  .ns-modal-dialog .btn-secondary[disabled],
-  .ns-modal-dialog button.btn-secondary[disabled]{opacity:.5;cursor:not-allowed;pointer-events:none;filter:grayscale(25%)}
-  .ns-modal-dialog .btn-primary,
-  .ns-modal-dialog a.btn-primary,
-  .ns-modal-dialog button.btn-primary {
+  .press-modal-dialog a.btn-github:visited { color:#ffffff !important; }
+  .press-modal-dialog .btn-github:hover { background:#3d7741 !important; }
+  .press-modal-dialog .btn-github:active { background:#298e46 !important; }
+  .press-modal-dialog .btn-secondary[disabled],
+  .press-modal-dialog button.btn-secondary[disabled]{opacity:.5;cursor:not-allowed;pointer-events:none;filter:grayscale(25%)}
+  .press-modal-dialog .btn-primary,
+  .press-modal-dialog a.btn-primary,
+  .press-modal-dialog button.btn-primary {
     display:inline-flex; align-items:center; justify-content:center; gap:.35rem;
     height:2.25rem; padding:.45rem .8rem; border-radius:8px; font-size:.93rem; line-height:1;
     text-decoration:none;
   }
-  .ns-modal-dialog .btn-primary[disabled],
-  .ns-modal-dialog button.btn-primary[disabled]{opacity:.6;cursor:not-allowed;pointer-events:none;filter:grayscale(25%)}
-  .ns-modal-dialog a.btn-primary:visited { color: white; }
+  .press-modal-dialog .btn-primary[disabled],
+  .press-modal-dialog button.btn-primary[disabled]{opacity:.6;cursor:not-allowed;pointer-events:none;filter:grayscale(25%)}
+  .press-modal-dialog a.btn-primary:visited { color: white; }
 
   /* Simple modal for the Composer wizard */
-  .ns-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(15,23,42,0.45);backdrop-filter:blur(3px);z-index:9999;padding:1rem}
-  .ns-modal.is-open{display:flex}
+  .press-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(15,23,42,0.45);backdrop-filter:blur(3px);z-index:9999;padding:1rem}
+  .press-modal.is-open{display:flex}
   /* Nudge modal upward on short viewports */
   @media (max-height: 820px){
-    .ns-modal{align-items:flex-start;padding-top:calc(max(12px, env(safe-area-inset-top)) + 24px)}
+    .press-modal{align-items:flex-start;padding-top:calc(max(12px, env(safe-area-inset-top)) + 24px)}
   }
   /* Remove top padding so sticky header can sit flush */
-  .ns-modal-dialog{position:relative;background:var(--card);color:var(--text);border:1px solid color-mix(in srgb, var(--primary) 28%, var(--border));border-radius:12px;box-shadow:0 14px 36px rgba(0,0,0,0.18),0 6px 18px rgba(0,0,0,0.12),0 1px 2px rgba(0,0,0,0.06);width:min(92vw, 760px);max-height:min(90vh, 720px);overflow:auto;padding:0 .85rem .85rem}
-  .ns-modal-close{position:absolute;top:.5rem;right:.6rem;z-index:3}
+  .press-modal-dialog{position:relative;background:var(--card);color:var(--text);border:1px solid color-mix(in srgb, var(--primary) 28%, var(--border));border-radius:12px;box-shadow:0 14px 36px rgba(0,0,0,0.18),0 6px 18px rgba(0,0,0,0.12),0 1px 2px rgba(0,0,0,0.06);width:min(92vw, 760px);max-height:min(90vh, 720px);overflow:auto;padding:0 .85rem .85rem}
+  .press-modal-close{position:absolute;top:.5rem;right:.6rem;z-index:3}
   /* When close button is inside the header, make it part of the flow */
-  .ns-modal-dialog .comp-guide-head .ns-modal-close{position:static;top:auto;right:auto;margin-left:auto}
-  body.ns-modal-open{overflow:hidden}
-  .ns-modal-dialog .comp-guide{border:none;background:transparent;padding:0;margin:0}
+  .press-modal-dialog .comp-guide-head .press-modal-close{position:static;top:auto;right:auto;margin-left:auto}
+  body.press-modal-open{overflow:hidden}
+  .press-modal-dialog .comp-guide{border:none;background:transparent;padding:0;margin:0}
 
   .composer-diff-tabs{display:flex;flex-wrap:wrap;gap:.35rem;margin:0 -.85rem;padding:0 .85rem .6rem;border-bottom:1px solid color-mix(in srgb,var(--text) 14%, var(--border));background:transparent}
   .composer-diff-tab{position:relative;border:0;background:none;padding:.48rem .92rem;border-radius:999px;font-weight:600;font-size:.93rem;color:color-mix(in srgb,var(--text) 68%, transparent);cursor:pointer;transition:color 160ms ease, background-color 160ms ease, transform 160ms ease}
@@ -16496,6 +19151,18 @@ function rebuildSiteUI() {
   .cs-repo-icon-affix{width:1rem;height:1rem;display:inline-flex;align-items:center;justify-content:center;flex:0 0 1rem}
   .cs-repo-icon-affix svg{display:block;fill:currentColor}
   .cs-repo-divider{align-self:flex-end;padding-bottom:.48rem;font-size:1.1rem;font-weight:600;color:color-mix(in srgb,var(--muted) 82%, transparent)}
+  .cs-publish-transport-settings{margin-top:.75rem;display:flex;flex-direction:column;gap:.6rem;width:100%;padding-top:.75rem;border-top:1px solid color-mix(in srgb,var(--border) 72%, transparent)}
+  .cs-publish-transport-header{display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap}
+  .cs-publish-transport-title{font-size:.82rem;font-weight:700;color:color-mix(in srgb,var(--text) 88%, transparent)}
+  .cs-publish-method-switch{margin-left:auto}
+  .cs-connect-publish-settings,.cs-pat-publish-settings{display:flex;flex-direction:column;gap:.45rem;width:100%}
+  .cs-connect-publish-settings[hidden],.cs-pat-publish-settings[hidden]{display:none}
+  .cs-connect-url-field{width:100%}
+  .cs-repo-field--connect-url{width:100%}
+  .cs-repo-input--connect-url{font-family:var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace)}
+  .cs-connect-publish-grant{margin:0;font-size:.8rem}
+  .cs-connect-publish-grant.is-error{color:color-mix(in srgb,#dc2626 88%, var(--text))}
+  .cs-connect-help{margin:0;font-size:.8rem}
   .cs-token-settings{margin-top:.35rem;display:flex;flex-direction:column;gap:.45rem;width:100%}
   .cs-token-field{width:100%;max-width:100%}
   .cs-token-field input{min-height:1.8rem;background:transparent}
@@ -16553,15 +19220,15 @@ function rebuildSiteUI() {
   @keyframes nsModalFadeOut { from { opacity: 1 } to { opacity: 0 } }
   @keyframes nsModalSlideIn { from { transform: translateY(10px) scale(.98); opacity: 0 } to { transform: translateY(0) scale(1); opacity: 1 } }
   @keyframes nsModalSlideOut { from { transform: translateY(0) scale(1); opacity: 1 } to { transform: translateY(8px) scale(.98); opacity: 0 } }
-  .ns-modal.ns-anim-in { animation: nsModalFadeIn 160ms ease both; }
-  .ns-modal.ns-anim-out { animation: nsModalFadeOut 160ms ease both; }
-  .ns-modal.ns-anim-in .ns-modal-dialog { animation: nsModalSlideIn 200ms cubic-bezier(.2,.95,.4,1) both; }
-  .ns-modal.ns-anim-out .ns-modal-dialog { animation: nsModalSlideOut 160ms ease both; }
+  .press-modal.press-anim-in { animation: nsModalFadeIn 160ms ease both; }
+  .press-modal.press-anim-out { animation: nsModalFadeOut 160ms ease both; }
+  .press-modal.press-anim-in .press-modal-dialog { animation: nsModalSlideIn 200ms cubic-bezier(.2,.95,.4,1) both; }
+  .press-modal.press-anim-out .press-modal-dialog { animation: nsModalSlideOut 160ms ease both; }
   @media (prefers-reduced-motion: reduce){
-    .ns-modal.ns-anim-in,
-    .ns-modal.ns-anim-out,
-    .ns-modal.ns-anim-in .ns-modal-dialog,
-    .ns-modal.ns-anim-out .ns-modal-dialog { animation: none !important; }
+    .press-modal.press-anim-in,
+    .press-modal.press-anim-out,
+    .press-modal.press-anim-in .press-modal-dialog,
+    .press-modal.press-anim-out .press-modal-dialog { animation: none !important; }
   }
   `;
   const s = document.createElement('style'); s.textContent = css; document.head.appendChild(s);

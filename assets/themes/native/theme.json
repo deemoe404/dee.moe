@@ -1,14 +1,93 @@
 {
+  "$schema": "../../schema/theme.json",
   "name": "Native",
+  "version": "3.4.0",
+  "contractVersion": 1,
+  "engines": {
+    "press": ">=3.4.0 <4.0.0"
+  },
+  "styles": [
+    "theme.css"
+  ],
   "modules": [
     "modules/layout.js",
     "modules/nav-tabs.js",
-    "modules/interactions.js",
     "modules/mainview.js",
     "modules/search-box.js",
     "modules/site-card.js",
     "modules/tag-filter.js",
     "modules/toc.js",
-    "modules/footer.js"
-  ]
+    "modules/footer.js",
+    "modules/interactions.js"
+  ],
+  "views": {
+    "post": {
+      "module": "modules/interactions.js",
+      "handler": "post"
+    },
+    "posts": {
+      "module": "modules/interactions.js",
+      "handler": "posts"
+    },
+    "search": {
+      "module": "modules/interactions.js",
+      "handler": "search"
+    },
+    "tab": {
+      "module": "modules/interactions.js",
+      "handler": "tab"
+    },
+    "error": {
+      "module": "modules/interactions.js",
+      "handler": "error"
+    },
+    "loading": {
+      "module": "modules/interactions.js",
+      "handler": "loading"
+    }
+  },
+  "regions": {
+    "main": {
+      "required": true
+    },
+    "toc": {},
+    "search": {},
+    "nav": {},
+    "tags": {},
+    "footer": {
+      "required": true
+    },
+    "container": {},
+    "content": {},
+    "footerNav": {},
+    "navBox": {},
+    "searchBox": {},
+    "sidebar": {},
+    "siteCard": {},
+    "tagBox": {},
+    "tocBox": {}
+  },
+  "components": [
+    "press-search",
+    "press-theme-controls",
+    "press-toc",
+    "press-post-card"
+  ],
+  "scrollContainer": false,
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true
+  },
+  "content": {
+    "shapes": [
+      "rawMarkdown",
+      "html",
+      "blocks",
+      "tocTree",
+      "headings",
+      "metadata",
+      "assets",
+      "links"
+    ]
+  }
 }

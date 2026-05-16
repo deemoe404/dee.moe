@@ -1,8 +1,30 @@
-import { t, getAvailableLangs, getLanguageLabel, getCurrentLang, switchLanguage, ensureLanguageBundle } from './i18n.js?v=20260505welcome';
-import './components.js';
+import { t, getAvailableLangs, getLanguageLabel, getCurrentLang, switchLanguage, ensureLanguageBundle } from './i18n.js?v=press-system-v3.4.16';
+import { getThemeRegion } from './theme-regions.js';
 
 const PACK_LINK_ID = 'theme-pack';
-const THEME_CONTROLS_BOUND = Symbol('nanoThemeControlsBound');
+const THEME_CONTROLS_BOUND = Symbol('pressThemeControlsBound');
+const THEME_CONTROLS_I18N_BOUND = Symbol('pressThemeControlsI18nBound');
+const NATIVE_STYLE_CACHE_KEY = 'press-system-v3.4.16';
+const THEME_PACK_KEY = 'themePack';
+const THEME_PACK_PENDING_KEY = 'themePackPending';
+const suppressedThemePacks = new Set();
+let componentsReady = null;
+
+function ensurePressComponents() {
+  if (typeof window === 'undefined' || typeof document === 'undefined' || typeof customElements === 'undefined') return null;
+  try {
+    if (customElements.get('press-theme-controls')) return null;
+  } catch (_) {
+    return null;
+  }
+  if (!componentsReady) {
+    componentsReady = import('./components.js').catch((err) => {
+      console.warn('[theme] Failed to load press components', err);
+      return null;
+    });
+  }
+  return componentsReady;
+}
 
 // Restrict theme pack names to safe slug format and default to 'native'.
 function sanitizePack(input) {
@@ -11,16 +33,111 @@ function sanitizePack(input) {
   return clean || 'native';
 }
 
+function getStoredPack(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? sanitizePack(raw) : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function setStoredPack(key, pack) {
+  try { localStorage.setItem(key, sanitizePack(pack)); } catch (_) {}
+}
+
+function removeStoredPack(key) {
+  try { localStorage.removeItem(key); } catch (_) {}
+}
+
+function buildThemePackHref(pack, options = {}) {
+  const baseHref = `assets/themes/${encodeURIComponent(pack)}/theme.css`;
+  const cacheKey = pack === 'native'
+    ? NATIVE_STYLE_CACHE_KEY
+    : String(options.cacheKey || '').trim();
+  return cacheKey ? `${baseHref}?v=${encodeURIComponent(cacheKey)}` : baseHref;
+}
+
+export function setThemePackStylesheet(name, options = {}) {
+  const pack = sanitizePack(name);
+  if (pack !== 'native' && suppressedThemePacks.has(pack) && options.allowSuppressed !== true) return '';
+  const link = document.getElementById(PACK_LINK_ID);
+  const href = buildThemePackHref(pack, options);
+  if (link) link.setAttribute('href', href);
+  try { window.__themePackHref = href; } catch (_) {}
+  return href;
+}
+
 export function loadThemePack(name) {
   const pack = sanitizePack(name);
-  try { localStorage.setItem('themePack', pack); } catch (_) {}
-  const link = document.getElementById(PACK_LINK_ID);
-  const href = `assets/themes/${encodeURIComponent(pack)}/theme.css`;
-  if (link) link.setAttribute('href', href);
+  setStoredPack(THEME_PACK_KEY, pack);
+  removeStoredPack(THEME_PACK_PENDING_KEY);
+  suppressedThemePacks.delete(pack);
+  setThemePackStylesheet(pack, { allowSuppressed: true });
 }
 
 export function getSavedThemePack() {
-  try { return sanitizePack(localStorage.getItem('themePack')) || 'native'; } catch (_) { return 'native'; }
+  return getStoredPack(THEME_PACK_KEY) || 'native';
+}
+
+export function getPendingThemePack() {
+  return getStoredPack(THEME_PACK_PENDING_KEY) || '';
+}
+
+export function getRequestedThemePack() {
+  const pending = getPendingThemePack();
+  if (pending) return pending;
+  const saved = getSavedThemePack();
+  if (saved !== 'native' && suppressedThemePacks.has(saved)) return 'native';
+  return saved;
+}
+
+function getThemeControlPack() {
+  const pending = getPendingThemePack();
+  if (pending && !suppressedThemePacks.has(pending)) return pending;
+  const saved = getSavedThemePack();
+  if (saved !== 'native' && suppressedThemePacks.has(saved)) return 'native';
+  return saved;
+}
+
+export function requestThemePackSwitch(name) {
+  const pack = sanitizePack(name);
+  suppressedThemePacks.delete(pack);
+  setStoredPack(THEME_PACK_PENDING_KEY, pack);
+}
+
+export function commitThemePack(name, options = {}) {
+  const pack = sanitizePack(name);
+  suppressedThemePacks.delete(pack);
+  setStoredPack(THEME_PACK_KEY, pack);
+  const pending = getPendingThemePack();
+  if (!pending || pending === pack || options.clearPending !== false) removeStoredPack(THEME_PACK_PENDING_KEY);
+  if (options.applyStyles !== false) {
+    setThemePackStylesheet(pack, { ...options, allowSuppressed: true });
+  }
+}
+
+export function clearPendingThemePack(name) {
+  const pending = getPendingThemePack();
+  if (!pending) return;
+  if (!name || pending === sanitizePack(name)) removeStoredPack(THEME_PACK_PENDING_KEY);
+}
+
+export function suppressThemePack(name) {
+  const pack = sanitizePack(name);
+  if (pack !== 'native') suppressedThemePacks.add(pack);
+}
+
+export function isThemePackSuppressed(name) {
+  const pack = sanitizePack(name);
+  return pack !== 'native' && suppressedThemePacks.has(pack);
+}
+
+function storeConfiguredThemePack(pack) {
+  if (!pack || isThemePackSuppressed(pack)) return;
+  setStoredPack(THEME_PACK_KEY, pack);
+  removeStoredPack(THEME_PACK_PENDING_KEY);
+  if (pack === 'native') setThemePackStylesheet(pack);
 }
 
 export function applySavedTheme() {
@@ -32,8 +149,8 @@ export function applySavedTheme() {
       document.documentElement.setAttribute('data-theme', 'dark');
     }
   } catch (_) { /* ignore */ }
-  // Ensure pack is applied too
-  loadThemePack(getSavedThemePack());
+  const pack = getRequestedThemePack();
+  if (pack === 'native') setThemePackStylesheet(pack);
 }
 
 // Apply theme according to site config. When override = true, it forces the
@@ -69,26 +186,27 @@ export function applyThemeConfig(siteConfig) {
       applySavedTheme();
     }
     if (pack) {
-      // Force pack and persist
-      try { localStorage.setItem('themePack', pack); } catch (_) {}
-      loadThemePack(pack);
+      storeConfiguredThemePack(pack);
     }
   } else {
     // Respect user choice; but if site provides a default and no user choice exists,
     // apply it once without persisting as an override
     const hasUserTheme = (() => { try { return !!localStorage.getItem('theme'); } catch (_) { return false; } })();
-    const hasUserPack = (() => { try { return !!localStorage.getItem('themePack'); } catch (_) { return false; } })();
+    const hasUserPack = (() => {
+      try { return !!localStorage.getItem(THEME_PACK_KEY) || !!getPendingThemePack(); }
+      catch (_) { return false; }
+    })();
     if (!hasUserTheme) {
       if (mode === 'dark' || mode === 'light' || mode === 'auto') setMode(mode);
       // When mode is 'user' and there's no saved user theme, do nothing here;
       // the boot code/applySavedTheme already applied system preference as a soft default.
     }
-    if (!hasUserPack && pack) loadThemePack(pack);
+    if (!hasUserPack && pack) storeConfiguredThemePack(pack);
   }
 }
 
 export function bindThemeToggle() {
-  if (document.querySelector('nano-theme-controls')) return;
+  if (document.querySelector('press-theme-controls')) return;
   const btn = document.getElementById('themeToggle');
   if (!btn) return;
   const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
@@ -101,7 +219,7 @@ export function bindThemeToggle() {
 }
 
 export function bindPostEditor() {
-  if (document.querySelector('nano-theme-controls')) return;
+  if (document.querySelector('press-theme-controls')) return;
   const btn = document.getElementById('postEditor');
   if (!btn) return;
   btn.addEventListener('click', () => {
@@ -122,23 +240,23 @@ export function bindPostEditor() {
 }
 
 export function bindThemePackPicker() {
-  if (document.querySelector('nano-theme-controls')) return;
+  if (document.querySelector('press-theme-controls')) return;
   const sel = document.getElementById('themePack');
   if (!sel) return;
   // Initialize selection
-  const saved = getSavedThemePack();
+  const saved = getThemeControlPack();
   sel.value = saved;
   sel.addEventListener('change', () => {
     const val = sanitizePack(sel.value) || 'native';
-    const current = getSavedThemePack();
-    if (val === current) return;
-    loadThemePack(val);
+    const current = getThemeControlPack();
+    if (val === current && !isThemePackSuppressed(val)) return;
+    requestThemePackSwitch(val);
     try { window.location.reload(); } catch (_) {}
   });
 }
 
 function getThemeControlsElement(root = document) {
-  return root && root.querySelector ? root.querySelector('nano-theme-controls') : null;
+  return root && root.querySelector ? root.querySelector('press-theme-controls') : null;
 }
 
 function getThemeControlLabels() {
@@ -155,15 +273,31 @@ function getThemeControlLabels() {
 function normalizePackList(list) {
   const out = [];
   const seen = new Set();
-  (Array.isArray(list) ? list : []).forEach((item) => {
-    if (!item) return;
-    const value = sanitizePack(item.value || item.slug || item.name);
-    if (!value || seen.has(value)) return;
-    out.push({ value, label: String(item.label || item.name || value) });
-    seen.add(value);
+  const lists = Array.isArray(list) && Array.isArray(list[0]) ? list : [list];
+  lists.forEach((items) => {
+    (Array.isArray(items) ? items : []).forEach((item) => {
+      if (!item) return;
+      const value = sanitizePack(item.value || item.slug || item.name);
+      if (!value || seen.has(value)) return;
+      out.push({ value, label: String(item.label || item.name || value) });
+      seen.add(value);
+    });
   });
   if (!out.length) out.push({ value: 'native', label: 'Native' });
   return out;
+}
+
+function fetchThemePackList(path, optional = false) {
+  return fetch(path, { cache: 'no-store' })
+    .then(r => {
+      if (r && r.ok) return r.json();
+      if (optional) return [];
+      return Promise.reject(new Error(`Unable to load ${path}`));
+    })
+    .catch((err) => {
+      if (optional) return [];
+      throw err;
+    });
 }
 
 function getLanguageOptions() {
@@ -172,6 +306,12 @@ function getLanguageOptions() {
     value: code,
     label: getLanguageLabel(code)
   }));
+}
+
+function refreshThemeControlsLanguages(component) {
+  if (!component || typeof component.setLanguages !== 'function') return;
+  try { component.setLabels(getThemeControlLabels()); } catch (_) {}
+  try { component.setLanguages(getLanguageOptions(), getCurrentLang()); } catch (_) {}
 }
 
 function openPostEditor() {
@@ -193,28 +333,37 @@ function openPostEditor() {
 function bindThemeControlsComponent(component) {
   if (!component || component[THEME_CONTROLS_BOUND]) return;
   component[THEME_CONTROLS_BOUND] = true;
-  component.addEventListener('nano:theme-toggle', () => {
+  if (!component[THEME_CONTROLS_I18N_BOUND] && typeof window !== 'undefined') {
+    component[THEME_CONTROLS_I18N_BOUND] = true;
+    window.addEventListener('ns:i18n-bundle-loaded', () => {
+      try {
+        if (!component.isConnected) return;
+        refreshThemeControlsLanguages(component);
+      } catch (_) {}
+    });
+  }
+  component.addEventListener('press:theme-toggle', () => {
     const dark = document.documentElement.getAttribute('data-theme') === 'dark';
     if (dark) document.documentElement.removeAttribute('data-theme');
     else document.documentElement.setAttribute('data-theme', 'dark');
     try { localStorage.setItem('theme', dark ? 'light' : 'dark'); } catch (_) {}
   });
-  component.addEventListener('nano:open-editor', () => openPostEditor());
-  component.addEventListener('nano:theme-pack-change', (event) => {
+  component.addEventListener('press:open-editor', () => openPostEditor());
+  component.addEventListener('press:theme-pack-change', (event) => {
     const detail = event && event.detail ? event.detail : {};
     const val = sanitizePack(detail.value) || 'native';
-    const current = getSavedThemePack();
-    if (val === current) return;
-    loadThemePack(val);
+    const current = getThemeControlPack();
+    if (val === current && !isThemePackSuppressed(val)) return;
+    requestThemePackSwitch(val);
     try { window.location.reload(); } catch (_) {}
   });
-  component.addEventListener('nano:language-change', async (event) => {
+  component.addEventListener('press:language-change', async (event) => {
     const detail = event && event.detail ? event.detail : {};
     const val = detail.value || 'en';
     try { await ensureLanguageBundle(val); } catch (_) {}
     switchLanguage(val);
   });
-  component.addEventListener('nano:language-reset', () => {
+  component.addEventListener('press:language-reset', () => {
     try { localStorage.removeItem('lang'); } catch (_) {}
     try {
       const url = new URL(window.location.href);
@@ -222,8 +371,8 @@ function bindThemeControlsComponent(component) {
       history.replaceState(history.state, document.title, url.toString());
     } catch (_) {}
     try {
-      if (window.__ns_softResetLang) {
-        window.__ns_softResetLang();
+      if (window.__press_softResetLang) {
+        window.__press_softResetLang();
         return;
       }
     } catch (_) {}
@@ -233,42 +382,49 @@ function bindThemeControlsComponent(component) {
 
 function populateThemeControls(component) {
   if (!component) return;
-  try { component.setLabels(getThemeControlLabels()); } catch (_) {}
-  try { component.setLanguages(getLanguageOptions(), getCurrentLang()); } catch (_) {}
+  refreshThemeControlsLanguages(component);
   try {
-    fetch('assets/themes/packs.json')
-      .then(r => r && r.ok ? r.json() : Promise.reject())
-      .then(list => {
-        component.setThemePacks(normalizePackList(list), getSavedThemePack());
+    ensureLanguageBundle(getCurrentLang())
+      .then(() => { refreshThemeControlsLanguages(component); })
+      .catch(() => {});
+  } catch (_) {}
+  try {
+    Promise.all([
+      fetchThemePackList('assets/themes/packs.json'),
+      fetchThemePackList('assets/themes/packs.local.json', true)
+    ])
+      .then(lists => {
+        component.setThemePacks(normalizePackList(lists), getThemeControlPack());
       })
       .catch(() => {
         component.setThemePacks(normalizePackList([
-          { value: 'native', label: 'Native' },
-          { value: 'arcus', label: 'Arcus' },
-          { value: 'solstice', label: 'Solstice' }
-        ]), getSavedThemePack());
+          { value: 'native', label: 'Native' }
+        ]), getThemeControlPack());
       });
   } catch (_) {
-    component.setThemePacks(normalizePackList([{ value: 'native', label: 'Native' }]), getSavedThemePack());
+    component.setThemePacks(normalizePackList([
+      { value: 'native', label: 'Native' }
+    ]), getThemeControlPack());
   }
 }
 
-// Render theme tools UI through <nano-theme-controls>. Options are sourced from
+// Render theme tools UI through <press-theme-controls>. Options are sourced from
 // assets/themes/packs.json; legacy button/select binders remain below for older
 // custom themes that have not migrated yet.
 export function mountThemeControls(options = {}) {
   const opts = options && typeof options === 'object' ? options : {};
   const variant = String(opts.variant || document.body.dataset.themeLayout || 'native').toLowerCase();
+  const componentImport = ensurePressComponents();
   let component = null;
   const host = opts.host || null;
 
-  if (host && host.matches && host.matches('nano-theme-controls')) {
+  if (host && host.matches && host.matches('press-theme-controls')) {
     component = host;
   } else if (host && host.querySelector) {
-    component = host.querySelector('nano-theme-controls');
+    component = host.querySelector('press-theme-controls');
     if (!component) {
       host.textContent = '';
-      component = document.createElement('nano-theme-controls');
+      component = document.createElement('press-theme-controls');
       host.appendChild(component);
     }
   } else {
@@ -276,24 +432,34 @@ export function mountThemeControls(options = {}) {
     if (!component) {
       const legacyTools = document.getElementById('tools');
       if (legacyTools && legacyTools.parentElement) {
-        component = document.createElement('nano-theme-controls');
+        component = document.createElement('press-theme-controls');
         legacyTools.parentElement.replaceChild(component, legacyTools);
       }
     }
     if (!component) {
       const sidebar = document.querySelector('.sidebar');
       if (!sidebar) return null;
-      component = document.createElement('nano-theme-controls');
-      const toc = document.getElementById('tocview');
+      component = document.createElement('press-theme-controls');
+      const toc = getThemeRegion('toc');
       if (toc && toc.parentElement === sidebar) sidebar.insertBefore(component, toc);
       else sidebar.appendChild(component);
     }
   }
 
-  component.setAttribute('variant', variant);
-  try { if (typeof component.render === 'function') component.render(); } catch (_) {}
-  bindThemeControlsComponent(component);
-  populateThemeControls(component);
+  const finish = () => {
+    component.setAttribute('variant', variant);
+    const upgraded = typeof component.render === 'function' && typeof component.setLabels === 'function';
+    if (!upgraded && componentImport) return;
+    try { if (typeof component.render === 'function') component.render(); } catch (_) {}
+    bindThemeControlsComponent(component);
+    if (upgraded) populateThemeControls(component);
+  };
+  finish();
+  if (componentImport && typeof componentImport.then === 'function') {
+    componentImport.then(() => {
+      try { finish(); } catch (_) {}
+    });
+  }
   return component;
 }
 
@@ -302,8 +468,7 @@ export function refreshLanguageSelector() {
   const component = getThemeControlsElement(document);
   if (component && typeof component.setLanguages === 'function') {
     try {
-      component.setLabels(getThemeControlLabels());
-      component.setLanguages(getLanguageOptions(), getCurrentLang());
+      refreshThemeControlsLanguages(component);
       component.setCurrentPack(getSavedThemePack());
       return;
     } catch (_) {}

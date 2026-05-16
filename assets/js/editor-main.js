@@ -1,7 +1,6 @@
 import { configureFetchCachePolicy } from './cache-control.js';
-import { createMarkdownBlocksEditor } from './editor-blocks.js?v=action-menu-flip-20260505';
-import { createHiEditor } from './hieditor.js';
-import { mdParse } from './markdown.js';
+import { createMarkdownBlocksEditor } from './editor-blocks.js?v=press-system-v3.4.16';
+import { createHiEditor } from './hieditor.js?v=press-system-v3.4.16';
 import { insertImageMarkdownAtSelection, normalizeDateInputValue } from './editor-markdown-ops.js';
 import {
   FRONT_MATTER_FIELD_DEFS,
@@ -11,30 +10,27 @@ import {
   parseMarkdownFrontMatter,
   resolveFrontMatterBindings,
   valueIsPresent
-} from './frontmatter-document.js';
-import { getContentRoot, resolveImageSrc, setSafeHtml } from './utils.js?v=editor-preview-images-20260504';
-import { initSyntaxHighlighting } from './syntax-highlight.js?v=blocks-code-gutter-20260505';
-import { applyLazyLoadingIn, hydratePostImages, hydratePostVideos } from './post-render.js';
-import { hydrateInternalLinkCards } from './link-cards.js';
-import { applyLangHints } from './typography.js';
+} from './frontmatter-document.js?v=press-system-v3.4.16';
+import { getContentRoot, resolveImageSrc } from './safe-html.js?v=press-system-v3.4.16';
+import { hydrateInternalLinkCards } from './link-cards.js?v=press-system-v3.4.16';
 import { fetchConfigWithYamlFallback, fetchMergedSiteConfig } from './yaml.js';
-import { t, withLangParam, loadContentJsonWithRaw, getCurrentLang, normalizeLangKey } from './i18n.js?v=20260505welcome';
+import { t, withLangParam, loadContentJsonWithRaw, getCurrentLang, normalizeLangKey } from './i18n.js?v=press-system-v3.4.16';
+import { resolveLocalMarkdownAssetReference } from './repository-deletions.js?v=press-system-v3.4.16';
 
-const LS_WRAP_KEY = 'ns_editor_wrap_enabled';
-const LS_VIEW_KEY = 'ns_editor_markdown_view';
+const LS_WRAP_KEY = 'press_editor_wrap_enabled';
+const LS_VIEW_KEY = 'press_editor_markdown_view_v2';
 const FORCE_MARKDOWN_WRAP = true;
 
 function normalizeMarkdownEditorView(mode) {
-  if (mode === 'preview') return 'preview';
-  if (mode === 'blocks') return 'blocks';
-  return 'edit';
+  if (mode === 'edit') return 'edit';
+  return 'blocks';
 }
 
 function readPersistedMarkdownEditorView() {
   try {
     return normalizeMarkdownEditorView(localStorage.getItem(LS_VIEW_KEY));
   } catch (_) {
-    return 'edit';
+    return 'blocks';
   }
 }
 
@@ -73,6 +69,11 @@ let previewAssetCurrentPath = '';
 let markdownBlocksEditor = null;
 let syncMarkdownBlocksFromSource = null;
 
+const PREVIEW_RENDER_MESSAGE = 'press-editor-preview-render';
+const PREVIEW_READY_MESSAGE = 'press-editor-preview-ready';
+const PREVIEW_RENDERED_MESSAGE = 'press-editor-preview-rendered';
+const PREVIEW_ERROR_MESSAGE = 'press-editor-preview-error';
+
 const ensureKeyOrder = (order = [], key) => {
   if (!key) return order;
   if (!order.includes(key)) order.push(key);
@@ -94,9 +95,9 @@ const getContentRootPrefix = () => {
 function syncFrontMatterLabelWidth(root) {
   if (!root || typeof root.querySelectorAll !== 'function') return;
   try {
-    if (typeof root.__nsFrontMatterLabelWidthCleanup === 'function') root.__nsFrontMatterLabelWidthCleanup();
+    if (typeof root.__pressFrontMatterLabelWidthCleanup === 'function') root.__pressFrontMatterLabelWidthCleanup();
   } catch (_) {}
-  try { root.__nsFrontMatterLabelWidthCleanup = null; } catch (_) {}
+  try { root.__pressFrontMatterLabelWidthCleanup = null; } catch (_) {}
 
   const labels = Array.from(root.querySelectorAll('.frontmatter-field-title'));
   if (!labels.length) {
@@ -200,7 +201,7 @@ function syncFrontMatterLabelWidth(root) {
   } catch (_) {}
   schedule();
 
-  root.__nsFrontMatterLabelWidthCleanup = () => {
+  root.__pressFrontMatterLabelWidthCleanup = () => {
     cancelFrame(frame);
     frame = 0;
     try { if (observer) observer.disconnect(); } catch (_) {}
@@ -404,11 +405,25 @@ const applyPreviewAssetOverrides = (container, markdownPath) => {
 };
 
 const refreshPreviewAssetOverrides = () => {
-  ['mainview', 'blocks-wrap'].forEach((id) => {
+  ['blocks-wrap'].forEach((id) => {
     const target = document.getElementById(id);
     if (!target) return;
     applyPreviewAssetOverrides(target, previewAssetCurrentPath);
   });
+};
+
+const collectPreviewAssetOverrides = (markdownPath) => {
+  const normPath = normalizePreviewPath(markdownPath || previewAssetCurrentPath);
+  if (!normPath) return [];
+  const bucket = previewAssetBuckets.get(normPath);
+  if (!bucket || !bucket.size) return [];
+  return Array.from(bucket.entries())
+    .map(([key, value]) => ({
+      key,
+      url: value && value.url ? String(value.url) : '',
+      mime: value && value.mime ? String(value.mime) : ''
+    }))
+    .filter((item) => item.key && item.url);
 };
 
 const fetchMarkdownForLinkCard = (loc) => {
@@ -676,31 +691,16 @@ function $(sel) { return document.querySelector(sel); }
 function switchView(mode) {
   const editorWrap = $('#editor-wrap');
   const blocksWrap = $('#blocks-wrap');
-  const previewWrap = $('#preview-wrap');
   const editorShell = $('#markdownEditorShell');
   const editorToolbar = $('#editorToolbar');
   const viewToggle = document.querySelector('.view-toggle');
   const viewButtons = Array.from(document.querySelectorAll('.vt-btn[data-view]'));
-  if (!editorWrap || !previewWrap) return;
+  if (!editorWrap) return;
   if (editorShell) editorShell.classList.toggle('is-blocks-mode', mode === 'blocks');
-  if (mode === 'preview') {
-    editorWrap.style.display = 'none';
-    if (blocksWrap) {
-      blocksWrap.hidden = true;
-      blocksWrap.setAttribute('aria-hidden', 'true');
-    }
-    if (editorShell) editorShell.style.display = 'none';
-    previewWrap.style.display = '';
-    if (editorToolbar) {
-      editorToolbar.hidden = true;
-      editorToolbar.setAttribute('aria-hidden', 'true');
-    }
-    viewToggle && (viewToggle.dataset.view = 'preview');
-  } else if (mode === 'blocks') {
+  if (mode === 'blocks') {
     if (typeof syncMarkdownBlocksFromSource === 'function') {
       try { syncMarkdownBlocksFromSource(); } catch (_) {}
     }
-    previewWrap.style.display = 'none';
     if (editorShell) editorShell.style.display = '';
     editorWrap.style.display = 'none';
     if (blocksWrap) {
@@ -714,7 +714,6 @@ function switchView(mode) {
     viewToggle && (viewToggle.dataset.view = 'blocks');
     try { if (markdownBlocksEditor && typeof markdownBlocksEditor.focus === 'function') markdownBlocksEditor.focus(); } catch (_) {}
   } else {
-    previewWrap.style.display = 'none';
     if (editorShell) editorShell.style.display = '';
     editorWrap.style.display = '';
     if (blocksWrap) {
@@ -727,35 +726,86 @@ function switchView(mode) {
     }
     viewToggle && (viewToggle.dataset.view = 'edit');
   }
-  viewButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.view === (mode === 'preview' ? 'preview' : mode === 'blocks' ? 'blocks' : 'edit')));
+  viewButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.view === (mode === 'blocks' ? 'blocks' : 'edit')));
+}
+
+let previewFrameReady = false;
+let previewRenderRequestId = 0;
+let previewThemeOverride = '';
+let previewThemeOptions = [{ value: 'native', label: 'Native' }];
+
+function sanitizePreviewThemePack(value) {
+  const clean = String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  return clean || 'native';
+}
+
+function getSitePreviewThemePack() {
+  return sanitizePreviewThemePack(editorSiteConfig && editorSiteConfig.themePack ? editorSiteConfig.themePack : 'native');
+}
+
+function getActivePreviewThemePack() {
+  return sanitizePreviewThemePack(previewThemeOverride || getSitePreviewThemePack());
+}
+
+function updatePreviewThemeSelect() {
+  try {
+    const select = document.getElementById('previewThemeSelect');
+    if (!select) return;
+    const active = getActivePreviewThemePack();
+    const options = Array.isArray(previewThemeOptions) && previewThemeOptions.length
+      ? previewThemeOptions
+      : [{ value: 'native', label: 'Native' }];
+    const seen = new Set();
+    select.innerHTML = '';
+    options.forEach((item) => {
+      const value = sanitizePreviewThemePack(item && item.value);
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = String((item && item.label) || value);
+      select.appendChild(option);
+    });
+    if (!seen.has(active)) {
+      const option = document.createElement('option');
+      option.value = active;
+      option.textContent = active;
+      select.appendChild(option);
+    }
+    select.value = active;
+  } catch (_) {}
+}
+
+function getPreviewPayload(mdText) {
+  const baseDir = (window.__press_editor_base_dir && String(window.__press_editor_base_dir))
+    || (`${getContentRoot()}/`);
+  return {
+    type: PREVIEW_RENDER_MESSAGE,
+    requestId: ++previewRenderRequestId,
+    themePack: getActivePreviewThemePack(),
+    markdown: mdText == null ? '' : String(mdText),
+    baseDir,
+    currentPath: previewAssetCurrentPath || '',
+    siteConfig: editorSiteConfig || {},
+    metadata: { location: previewAssetCurrentPath || '' },
+    postsIndex: editorPostsIndexCache || {},
+    postsByLocationTitle: editorPostsByLocationTitle || {},
+    allowedLocations: linkCardReady && editorAllowedLocations ? Array.from(editorAllowedLocations) : [],
+    locationAliases: linkCardReady && editorLocationAliasMap ? Array.from(editorLocationAliasMap.entries()) : [],
+    assetOverrides: collectPreviewAssetOverrides(previewAssetCurrentPath)
+  };
 }
 
 function renderPreview(mdText) {
   try {
-    const target = document.getElementById('mainview');
-    if (!target) return;
-    // Use the current markdown file directory (if known) as baseDir
-    // so relative image/link paths resolve correctly in preview.
-    const baseDir = (window.__ns_editor_base_dir && String(window.__ns_editor_base_dir))
-      || (`${getContentRoot()}/`);
-    const { post } = mdParse(mdText || '', baseDir);
-    setSafeHtml(target, post || '', baseDir, { alreadySanitized: true });
-    try { hydratePostImages(target); } catch (_) {}
-    try { applyLazyLoadingIn(target); } catch (_) {}
-    try { applyLangHints(target); } catch (_) {}
-    try { hydrateInternalLinkCards(target, {
-      allowedLocations: linkCardReady ? editorAllowedLocations : null,
-      locationAliasMap: linkCardReady ? editorLocationAliasMap : new Map(),
-      postsByLocationTitle: linkCardReady ? editorPostsByLocationTitle : {},
-      postsIndexCache: linkCardReady ? editorPostsIndexCache : {},
-      siteConfig: editorSiteConfig,
-      translate: t,
-      makeHref: (loc) => withLangParam(`?id=${encodeURIComponent(loc)}`),
-      fetchMarkdown: fetchMarkdownForLinkCard
-    }); } catch (_) {}
-    try { hydratePostVideos(target); } catch (_) {}
-    try { initSyntaxHighlighting(target); } catch (_) {}
-    try { applyPreviewAssetOverrides(target, previewAssetCurrentPath); } catch (_) {}
+    updatePreviewThemeSelect();
+    const previewWrap = document.getElementById('preview-wrap');
+    if (!previewWrap || previewWrap.hidden) return;
+    const frame = document.getElementById('previewFrame');
+    if (!frame || !frame.contentWindow) return;
+    const payload = getPreviewPayload(mdText);
+    frame.__pressPendingPreviewPayload = payload;
+    frame.contentWindow.postMessage(payload, window.location.origin);
   } catch (_) {}
 }
 
@@ -768,6 +818,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const imageInput = document.getElementById('editorImageInput');
   const editorToolbarEl = document.getElementById('editorToolbar');
   const blocksWrap = document.getElementById('blocks-wrap');
+  const previewWrap = document.getElementById('preview-wrap');
+  const previewFrame = document.getElementById('previewFrame');
+  const previewFrameSizer = document.getElementById('previewFrameSizer');
+  const previewViewportShell = document.getElementById('previewViewportShell');
+  const previewPathLabel = document.getElementById('previewPathLabel');
+  const closePreviewButton = document.getElementById('btnClosePreview');
+  const previewThemeSelect = document.getElementById('previewThemeSelect');
   const cardButton = document.getElementById('btnInsertCard');
   const cardPopover = document.getElementById('editorCardPicker');
   const cardSearchInput = document.getElementById('cardPickerSearch');
@@ -872,7 +929,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   applyWrapState(readWrapState(), { persist: false });
 
-  const seed = `# 新文章标题\n\n> 在左侧编辑 Markdown，切换到 Preview 查看渲染效果。\n\n- 支持代码块、表格、待办列表\n- 图片与视频语法\n\n\`\`\`js\nconsole.log('Hello, NanoSite!');\n\`\`\`\n`;
+  const seed = `# 新文章标题\n\n> 在左侧编辑 Markdown，切换到 Preview 查看渲染效果。\n\n- 支持代码块、表格、待办列表\n- 图片与视频语法\n\n\`\`\`js\nconsole.log('Hello, Press!');\n\`\`\`\n`;
 
   const frontMatterManager = (() => {
     const panel = document.getElementById('frontMatterPanel');
@@ -1168,6 +1225,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (registry.size) return;
       if (panel.dataset.state === 'loading') panel.dataset.state = 'ready';
       FRONT_MATTER_FIELD_DEFS.forEach((def) => {
+        if (def && def.hidden) return;
         const entry = createField(def, { key: def.keys[0] });
         registry.set(def.id, entry);
         const parent = entry.section === 'advanced' ? extraFieldsEl : commonFieldsEl;
@@ -1474,14 +1532,16 @@ document.addEventListener('DOMContentLoaded', () => {
     updatePreviewAssetBucket(markdownPath, detail.assets || []);
     if (!markdownPath) {
       refreshPreviewAssetOverrides();
+      refreshPreview();
       return;
     }
     if (markdownPath === normalizePreviewPath(previewAssetCurrentPath)) {
       refreshPreviewAssetOverrides();
+      refreshPreview();
     }
   };
 
-  try { window.addEventListener('ns-editor-asset-preview', handleAssetPreviewEvent); }
+  try { window.addEventListener('press-editor-asset-preview', handleAssetPreviewEvent); }
   catch (_) {}
 
   const requestLayout = () => {
@@ -1514,6 +1574,228 @@ document.addEventListener('DOMContentLoaded', () => {
     try { renderPreview(getValue()); } catch (_) {}
   };
 
+  const getPreviewPathText = () => {
+    try {
+      const path = currentFileInfo && currentFileInfo.path ? String(currentFileInfo.path) : '';
+      const crumbs = currentFileInfo && Array.isArray(currentFileInfo.breadcrumb)
+        ? currentFileInfo.breadcrumb
+          .map((item) => (item && item.label ? String(item.label).trim() : ''))
+          .filter(Boolean)
+        : [];
+      return crumbs.length ? crumbs.join(' / ') : path;
+    } catch (_) {
+      return '';
+    }
+  };
+
+  const resetPreviewViewportWidth = () => {
+    if (!previewFrameSizer) return;
+    previewFrameSizer.style.width = '';
+    previewFrameSizer.classList.remove('is-resizing');
+    if (previewFrame) previewFrame.style.pointerEvents = '';
+  };
+
+  const setPreviewViewportWidth = (width) => {
+    if (!previewFrameSizer || !previewViewportShell) return;
+    const shellRect = previewViewportShell.getBoundingClientRect();
+    const handleSpace = 36;
+    const maxWidth = Math.max(0, (shellRect.width || 0) - handleSpace);
+    if (!maxWidth) return;
+    const minWidth = Math.min(360, maxWidth);
+    const clamped = Math.max(minWidth, Math.min(maxWidth, width));
+    previewFrameSizer.style.width = `${Math.round(clamped)}px`;
+  };
+
+  const PREVIEW_OVERLAY_CLOSE_MS = 260;
+  let previewOverlayFrame = 0;
+  let previewOverlayCloseTimer = 0;
+
+  const clearPreviewOverlayAnimation = () => {
+    if (previewOverlayFrame) {
+      try { cancelAnimationFrame(previewOverlayFrame); } catch (_) {}
+      previewOverlayFrame = 0;
+    }
+    if (previewOverlayCloseTimer) {
+      clearTimeout(previewOverlayCloseTimer);
+      previewOverlayCloseTimer = 0;
+    }
+  };
+
+  const prefersReducedPreviewMotion = () => {
+    try {
+      return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const openPreviewOverlay = () => {
+    if (!previewWrap) return;
+    clearPreviewOverlayAnimation();
+    if (previewPathLabel) previewPathLabel.textContent = getPreviewPathText() || 'Preview';
+    resetPreviewViewportWidth();
+    previewWrap.hidden = false;
+    previewWrap.removeAttribute('aria-hidden');
+    previewWrap.classList.remove('is-closing');
+    previewWrap.classList.remove('is-open');
+    previewOverlayFrame = requestAnimationFrame(() => {
+      previewOverlayFrame = 0;
+      previewWrap.classList.add('is-open');
+    });
+    updatePreviewThemeSelect();
+    refreshPreview();
+    try { previewWrap.focus && previewWrap.focus(); } catch (_) {}
+  };
+
+  const closePreviewOverlay = () => {
+    if (!previewWrap) return;
+    clearPreviewOverlayAnimation();
+    previewWrap.setAttribute('aria-hidden', 'true');
+    previewWrap.classList.remove('is-open');
+    if (prefersReducedPreviewMotion()) {
+      previewWrap.classList.remove('is-closing');
+      previewWrap.hidden = true;
+      resetPreviewViewportWidth();
+      return;
+    }
+    previewWrap.classList.add('is-closing');
+    previewOverlayCloseTimer = setTimeout(() => {
+      previewOverlayCloseTimer = 0;
+      previewWrap.hidden = true;
+      previewWrap.classList.remove('is-closing');
+      resetPreviewViewportWidth();
+    }, PREVIEW_OVERLAY_CLOSE_MS);
+  };
+
+  const startPreviewResize = (event, side) => {
+    if (!previewFrameSizer || !previewViewportShell) return;
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+    const startX = event && Number.isFinite(event.clientX) ? event.clientX : 0;
+    const startRect = previewFrameSizer.getBoundingClientRect();
+    const startWidth = startRect.width || 0;
+    const direction = side === 'left' ? -1 : 1;
+    previewFrameSizer.classList.add('is-resizing');
+    if (previewFrame) previewFrame.style.pointerEvents = 'none';
+
+    const handleMove = (moveEvent) => {
+      const currentX = moveEvent && Number.isFinite(moveEvent.clientX) ? moveEvent.clientX : startX;
+      const delta = currentX - startX;
+      setPreviewViewportWidth(startWidth + (delta * direction * 2));
+    };
+    const handleEnd = () => {
+      document.removeEventListener('pointermove', handleMove);
+      document.removeEventListener('pointerup', handleEnd);
+      document.removeEventListener('pointercancel', handleEnd);
+      previewFrameSizer.classList.remove('is-resizing');
+      if (previewFrame) previewFrame.style.pointerEvents = '';
+    };
+
+    document.addEventListener('pointermove', handleMove);
+    document.addEventListener('pointerup', handleEnd, { once: true });
+    document.addEventListener('pointercancel', handleEnd, { once: true });
+  };
+
+  const flushPendingPreview = () => {
+    try {
+      if (!previewFrame || !previewFrame.contentWindow || !previewFrame.__pressPendingPreviewPayload) return;
+      if (!previewFrameReady) return;
+      previewFrame.contentWindow.postMessage(previewFrame.__pressPendingPreviewPayload, window.location.origin);
+    } catch (_) {}
+  };
+
+  const loadPreviewThemeOptions = () => {
+    const normalizeThemeOptions = (lists) => {
+      const normalized = [];
+      const seen = new Set();
+      lists.forEach((list) => {
+        (Array.isArray(list) ? list : []).forEach((item) => {
+          const value = sanitizePreviewThemePack(item && item.value);
+          if (!value || seen.has(value)) return;
+          seen.add(value);
+          normalized.push({ value, label: String((item && item.label) || value) });
+        });
+      });
+      return normalized;
+    };
+    const fetchThemeList = (path, optional = false) => fetch(path, { cache: 'no-store' })
+      .then((response) => {
+        if (response && response.ok) return response.json();
+        if (optional) return [];
+        return Promise.reject(new Error(`Unable to load ${path}`));
+      })
+      .catch((err) => {
+        if (optional) return [];
+        throw err;
+      });
+    Promise.all([
+      fetchThemeList('assets/themes/packs.json'),
+      fetchThemeList('assets/themes/packs.local.json', true)
+    ])
+      .then((lists) => {
+        const normalized = normalizeThemeOptions(lists);
+        if (normalized.length) previewThemeOptions = normalized;
+        updatePreviewThemeSelect();
+      })
+      .catch(() => { updatePreviewThemeSelect(); });
+  };
+
+  if (previewFrame) {
+    previewFrame.addEventListener('load', () => {
+      previewFrameReady = false;
+      setTimeout(flushPendingPreview, 0);
+    });
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.origin !== window.location.origin) return;
+    if (!previewFrame || event.source !== previewFrame.contentWindow) return;
+    const detail = event.data && typeof event.data === 'object' ? event.data : {};
+    if (detail.type === PREVIEW_READY_MESSAGE) {
+      previewFrameReady = true;
+      flushPendingPreview();
+    } else if (detail.type === PREVIEW_RENDERED_MESSAGE) {
+      previewFrameReady = true;
+    } else if (detail.type === PREVIEW_ERROR_MESSAGE) {
+      previewFrameReady = true;
+      try { console.warn('Editor preview render failed', detail.message || detail); } catch (_) {}
+    }
+  });
+
+  if (previewThemeSelect) {
+    previewThemeSelect.addEventListener('change', () => {
+      previewThemeOverride = sanitizePreviewThemePack(previewThemeSelect.value || 'native');
+      updatePreviewThemeSelect();
+      refreshPreview();
+    });
+  }
+  if (closePreviewButton) {
+    closePreviewButton.addEventListener('click', () => {
+      closePreviewOverlay();
+    });
+  }
+  document.querySelectorAll('[data-preview-resize]').forEach((handle) => {
+    handle.addEventListener('pointerdown', (event) => {
+      startPreviewResize(event, handle.getAttribute('data-preview-resize') || 'right');
+    });
+  });
+  document.addEventListener('keydown', (event) => {
+    if (!event || event.key !== 'Escape') return;
+    if (!previewWrap || previewWrap.hidden) return;
+    event.preventDefault();
+    closePreviewOverlay();
+  });
+  loadPreviewThemeOptions();
+
+  window.addEventListener('press-editor-site-config-change', (event) => {
+    const detail = event && event.detail && typeof event.detail === 'object' ? event.detail : {};
+    if (detail.siteConfig && typeof detail.siteConfig === 'object') {
+      editorSiteConfig = detail.siteConfig;
+      try { configureFetchCachePolicy(editorSiteConfig, { context: 'editor' }); } catch (_) {}
+      if (!previewThemeOverride) updatePreviewThemeSelect();
+      refreshPreview();
+    }
+  });
+
   const setValue = (value, opts = {}) => {
     const text = value == null ? '' : String(value);
     const { preview = true, notify = true } = opts;
@@ -1538,9 +1820,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const normalized = raw
         ? raw.replace(/\\+/g, '/').replace(/\/?$/, '/')
         : fallback;
-      window.__ns_editor_base_dir = normalized;
+      window.__press_editor_base_dir = normalized;
     } catch (_) {
-      try { window.__ns_editor_base_dir = fallback; } catch (__) {}
+      try { window.__press_editor_base_dir = fallback; } catch (__) {}
     }
   };
 
@@ -1556,6 +1838,7 @@ document.addEventListener('DOMContentLoaded', () => {
     list: 'List',
     quote: 'Quote',
     code: 'Code',
+    math: 'Math',
     source: 'Markdown',
     articleCard: 'Article Card',
     uploadImage: 'Upload Image',
@@ -1571,6 +1854,7 @@ document.addEventListener('DOMContentLoaded', () => {
     imageAlt: 'Alt text',
     imagePath: 'Image path',
     replaceImage: 'Replace image',
+    deleteImageResource: 'Delete resource',
     unordered: 'Bulleted',
     ordered: 'Numbered',
     task: 'Checklist',
@@ -1583,18 +1867,23 @@ document.addEventListener('DOMContentLoaded', () => {
     inlineStrike: 'Strikethrough',
     inlineCode: 'Inline code',
     inlineLink: 'Link',
+    inlineMath: 'Math',
     inlineMore: 'More formatting',
     linkPrompt: 'Link URL',
     linkText: 'Link text',
     linkHref: 'Link URL',
     linkTitle: 'Link title',
     unlink: 'Unlink',
+    mathSource: 'LaTeX source',
+    removeMath: 'Remove',
+    editMath: 'Edit math',
     listAddItem: 'Add item',
     listRemoveItem: 'Remove item',
     imageTitle: 'Image title',
     'sourceReason.blank': 'This empty Markdown segment is preserved as source.',
     'sourceReason.frontMatter': 'Front matter is preserved as raw Markdown so document metadata stays intact.',
     'sourceReason.unclosedFence': 'This fenced code block is incomplete, so it is kept as Markdown source.',
+    'sourceReason.unclosedMath': 'This display math block is incomplete, so it is kept as Markdown source.',
     'sourceReason.callout': 'This block uses callout-style Markdown that the visual block editor does not edit directly.',
     'sourceReason.table': 'This table-like Markdown is kept as source because the visual block editor does not support table editing yet.',
     'sourceReason.indentedList': 'This list starts with indentation, so it is kept as source to avoid changing whether it means a nested list or code-like Markdown.',
@@ -1653,11 +1942,26 @@ document.addEventListener('DOMContentLoaded', () => {
     renderPreview(getValue());
     notifyChange();
   };
+
+  const editorText = (key, fallback, params) => {
+    try {
+      const translated = t(key, params);
+      if (translated && translated !== key) return translated;
+    } catch (_) {}
+    return fallback;
+  };
+
+  const resolveCurrentImageResource = (src) => {
+    const markdownPath = getCurrentMarkdownPath();
+    if (!markdownPath) return null;
+    return resolveLocalMarkdownAssetReference(markdownPath, src, getContentRoot());
+  };
+
   if (blocksWrap) {
     markdownBlocksEditor = createMarkdownBlocksEditor(blocksWrap, {
       labels: blockLabels,
       onChange: setEditorBodyFromBlocks,
-      getBaseDir: () => (window.__ns_editor_base_dir && String(window.__ns_editor_base_dir)) || `${getContentRoot()}/`,
+      getBaseDir: () => (window.__press_editor_base_dir && String(window.__press_editor_base_dir)) || `${getContentRoot()}/`,
       resolveImageSrc,
       hydrateImages: (node) => {
         try { applyPreviewAssetOverrides(node, getCurrentMarkdownPath()); } catch (_) {}
@@ -1689,6 +1993,54 @@ document.addEventListener('DOMContentLoaded', () => {
           return;
         }
         openImageInputPicker();
+      },
+      canDeleteImageResource: (src) => !!resolveCurrentImageResource(src),
+      requestImageDelete: ({ index, blockId, src } = {}) => {
+        if (!markdownBlocksEditor || typeof markdownBlocksEditor.deleteImageBlock !== 'function') return;
+        const target = {
+          index: Number.isFinite(index) ? index : null,
+          blockId: typeof blockId === 'string' && blockId ? blockId : null
+        };
+        const source = typeof markdownBlocksEditor.getImageBlockSource === 'function'
+          ? markdownBlocksEditor.getImageBlockSource(target)
+          : src;
+        const markdownPath = getCurrentMarkdownPath();
+        if (!markdownPath) {
+          emitEditorToast('warn', t('editor.toasts.markdownOpenBeforeInsert'));
+          return;
+        }
+        const resolved = resolveLocalMarkdownAssetReference(markdownPath, source || src, getContentRoot());
+        if (!resolved) {
+          emitEditorToast('warn', editorText('editor.toasts.assetDeleteUnsupported', 'Only local assets next to the current Markdown file can be deleted.'));
+          return;
+        }
+        const detail = {
+          markdownPath,
+          src: source || src || '',
+          assetPath: resolved.contentPath,
+          commitPath: resolved.commitPath,
+          relativePath: resolved.relativePath
+        };
+        let accepted = true;
+        try {
+          accepted = window.dispatchEvent(new CustomEvent('press-editor-asset-delete-requested', {
+            detail,
+            cancelable: true
+          }));
+        } catch (_) {
+          accepted = false;
+        }
+        if (!accepted || detail.rejected) {
+          emitEditorToast('warn', detail.message || editorText('editor.toasts.assetDeleteRejected', 'This image resource cannot be deleted yet.'));
+          return;
+        }
+        const result = markdownBlocksEditor.deleteImageBlock(target);
+        if (!result) {
+          try {
+            window.dispatchEvent(new CustomEvent('press-editor-asset-delete-canceled', { detail }));
+          } catch (_) {}
+          emitEditorToast('warn', editorText('editor.toasts.imageDeleteTargetMissing', 'The image block no longer exists. Select an image block and try again.'));
+        }
       }
     });
     syncMarkdownBlocksFromSource = () => {
@@ -2250,7 +2602,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   recordSelection();
 
-  document.addEventListener('ns-editor-language-applied', () => {
+  document.addEventListener('press-editor-language-applied', () => {
     tooltipButtons.forEach(btn => applyButtonTooltipState(btn, !!btn.disabled));
     renderCurrentFileIndicator();
     if (markdownBlocksEditor && typeof markdownBlocksEditor.requestLayout === 'function') {
@@ -2302,7 +2654,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const text = message == null ? '' : String(message);
     if (!text) return;
     try {
-      window.dispatchEvent(new CustomEvent('ns-editor-toast', { detail: { kind: kind || 'info', message: text } }));
+      window.dispatchEvent(new CustomEvent('press-editor-toast', { detail: { kind: kind || 'info', message: text } }));
     } catch (_) {}
   };
 
@@ -2497,7 +2849,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       try {
-        window.dispatchEvent(new CustomEvent('ns-editor-asset-added', {
+        window.dispatchEvent(new CustomEvent('press-editor-asset-added', {
           detail: {
             markdownPath,
             fileName: meta.fileName,
@@ -2742,7 +3094,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!nodeId) return;
       event.preventDefault();
       try {
-        document.dispatchEvent(new CustomEvent('ns-editor-current-file-breadcrumb-select', {
+        document.dispatchEvent(new CustomEvent('press-editor-current-file-breadcrumb-select', {
           detail: {
             nodeId,
             path: target.dataset.currentFilePath || ''
@@ -2764,6 +3116,7 @@ document.addEventListener('DOMContentLoaded', () => {
       el.removeAttribute('title');
       el.removeAttribute('data-dirty');
       el.removeAttribute('data-draft-state');
+      if (previewPathLabel) previewPathLabel.textContent = '';
       return;
     }
 
@@ -2816,6 +3169,9 @@ document.addEventListener('DOMContentLoaded', () => {
     else el.removeAttribute('data-dirty');
     if (draftState) el.setAttribute('data-draft-state', draftState);
     else el.removeAttribute('data-draft-state');
+    if (previewPathLabel && previewWrap && !previewWrap.hidden) {
+      previewPathLabel.textContent = getPreviewPathText() || 'Preview';
+    }
   };
 
   const bindCurrentFileElement = (el) => {
@@ -2830,6 +3186,7 @@ document.addEventListener('DOMContentLoaded', () => {
     previewAssetCurrentPath = normalizePreviewPath(currentFileInfo.path || '');
     renderCurrentFileIndicator();
     refreshPreviewAssetOverrides();
+    refreshPreview();
   };
 
   renderCurrentFileIndicator();
@@ -2933,10 +3290,13 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   const applyMarkdownEditorView = (mode, opts = {}) => {
+    if (mode === 'preview') {
+      openPreviewOverlay();
+      return;
+    }
     const nextView = normalizeMarkdownEditorView(mode);
     switchView(nextView);
-    if (nextView === 'preview') renderPreview(getValue());
-    else if (nextView === 'blocks' && markdownBlocksEditor && typeof markdownBlocksEditor.requestLayout === 'function') {
+    if (nextView === 'blocks' && markdownBlocksEditor && typeof markdownBlocksEditor.requestLayout === 'function') {
       try { markdownBlocksEditor.requestLayout(); } catch (_) {}
     } else {
       requestLayout();
@@ -2951,6 +3311,13 @@ document.addEventListener('DOMContentLoaded', () => {
       applyMarkdownEditorView(a.dataset.view, { persist: true });
     });
   });
+  const previewOpenButton = document.getElementById('btnOpenPreview');
+  if (previewOpenButton) {
+    previewOpenButton.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      openPreviewOverlay();
+    });
+  }
 
   const primaryEditorApi = {
     getValue,
@@ -2965,7 +3332,7 @@ document.addEventListener('DOMContentLoaded', () => {
     restorePersistedView: (opts = {}) => applyMarkdownEditorView(readPersistedMarkdownEditorView(), opts),
     getView: () => {
       const viewToggle = document.querySelector('.view-toggle');
-      return normalizeMarkdownEditorView(viewToggle && viewToggle.dataset ? viewToggle.dataset.view : 'edit');
+      return normalizeMarkdownEditorView(viewToggle && viewToggle.dataset ? viewToggle.dataset.view : 'blocks');
     },
     setBaseDir: (dir) => setBaseDir(dir),
     setCurrentFileLabel: (label) => assignCurrentFileLabel(label),
@@ -2987,14 +3354,14 @@ document.addEventListener('DOMContentLoaded', () => {
     isWrapEnabled: () => wrapEnabled
   };
 
-  try { window.__ns_primary_editor = primaryEditorApi; } catch (_) {}
+  try { window.__press_primary_editor = primaryEditorApi; } catch (_) {}
 
   // Clear draft action removed (no local storage drafts)
 
   // Draft persistence on unload removed
 
-  // Default to editor view
-  switchView('edit');
+  // Default to blocks view
+  switchView('blocks');
 
   // Back-to-top button behavior
   (function initBackToTop() {
@@ -3026,7 +3393,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let contentRoot = 'wwwroot';
     // Track current markdown base directory for resolving relative assets
     // Expose to window so renderPreview can access outside this closure
-    try { if (!window.__ns_editor_base_dir) window.__ns_editor_base_dir = `${contentRoot}/`; } catch (_) {}
+    try { if (!window.__press_editor_base_dir) window.__press_editor_base_dir = `${contentRoot}/`; } catch (_) {}
     let activeGroup = 'index';
 
     const setStatus = (msg) => { if (statusEl) statusEl.textContent = msg || ''; };
@@ -3419,14 +3786,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const site = await fetchMergedSiteConfig();
         editorSiteConfig = site || {};
         try { configureFetchCachePolicy(editorSiteConfig, { context: 'editor' }); } catch (_) {}
+        updatePreviewThemeSelect();
         contentRoot = (site && site.contentRoot) ? String(site.contentRoot) : 'wwwroot';
       } catch (_) {
         editorSiteConfig = {};
         contentRoot = 'wwwroot';
       }
       // Keep a global hint for content root, and default editor base dir
-      try { window.__ns_content_root = contentRoot; } catch (_) {}
-      try { window.__ns_editor_base_dir = `${contentRoot}/`; } catch (_) {}
+      try { window.__press_content_root = contentRoot; } catch (_) {}
+      try { window.__press_editor_base_dir = `${contentRoot}/`; } catch (_) {}
 
       try {
         setStatus('Loading index…');

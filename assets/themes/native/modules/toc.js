@@ -4,21 +4,25 @@ export function mount(context = {}) {
   const sidebar = regions.sidebar || doc.querySelector('.sidebar');
   if (!doc || !sidebar) return context;
 
-  let toc = doc.getElementById('tocview');
+  let toc = sidebar.querySelector('[data-theme-region="toc"]') || sidebar.querySelector('.native-toc');
   if (!toc) {
-    toc = doc.createElement('nano-toc');
-    toc.className = 'box';
-    toc.id = 'tocview';
-    toc.setAttribute('variant', 'native');
+    toc = doc.createElement('press-toc');
+    toc.className = 'box native-toc';
+    toc.setAttribute('data-theme-region', 'toc');
     sidebar.appendChild(toc);
   } else if (!toc.classList.contains('box')) {
     toc.classList.add('box');
   }
-  if (toc.tagName && toc.tagName.toLowerCase() === 'nano-toc') {
-    toc.setAttribute('variant', 'native');
-  }
+  toc.classList.add('native-toc');
+  toc.setAttribute('data-theme-region', 'toc');
 
-  const updatedRegions = { ...regions, tocBox: toc };
-  context.regions = updatedRegions;
-  return { regions: updatedRegions };
+  if (typeof regions.register === 'function') {
+    regions.register('toc', toc);
+    regions.register('tocBox', toc);
+  } else {
+    regions.toc = toc;
+    regions.tocBox = toc;
+  }
+  context.regions = regions;
+  return { regions };
 }

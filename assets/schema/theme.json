@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://press.schema/theme.schema.json",
+  "title": "Press Theme Manifest",
+  "description": "Schema for assets/themes/<pack>/theme.json.",
+  "since": "v3.4.0",
+  "type": "object",
+  "required": [
+    "contractVersion",
+    "engines",
+    "content",
+    "modules"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable theme name."
+    },
+    "version": {
+      "type": "string",
+      "description": "Theme pack version."
+    },
+    "contractVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Press theme contract version this manifest targets."
+    },
+    "engines": {
+      "type": "object",
+      "description": "Runtime engine compatibility ranges for this theme.",
+      "required": [
+        "press"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "press": {
+          "type": "string",
+          "description": "Supported Press system SemVer range."
+        }
+      }
+    },
+    "styles": {
+      "type": "array",
+      "description": "Ordered CSS file list relative to the theme pack root.",
+      "items": {
+        "type": "string",
+        "pattern": "^(?!.*\\.\\.)(?![./\\\\]).+\\.css$"
+      },
+      "uniqueItems": true
+    },
+    "modules": {
+      "type": "array",
+      "description": "Ordered JavaScript module list relative to the theme pack root.",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^(?!.*\\.\\.)(?![./\\\\]).+\\.js$"
+      }
+    },
+    "views": {
+      "type": "object",
+      "description": "View handlers and states supported by the theme.",
+      "required": [
+        "post",
+        "posts",
+        "search",
+        "tab"
+      ],
+      "additionalProperties": {
+        "type": "object"
+      },
+      "properties": {
+        "post": { "$ref": "#/$defs/viewDeclaration" },
+        "posts": { "$ref": "#/$defs/viewDeclaration" },
+        "search": { "$ref": "#/$defs/viewDeclaration" },
+        "tab": { "$ref": "#/$defs/viewDeclaration" },
+        "error": { "$ref": "#/$defs/viewDeclaration" },
+        "loading": { "$ref": "#/$defs/viewDeclaration" }
+      }
+    },
+    "regions": {
+      "type": "object",
+      "description": "Stable named regions exposed by the theme.",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/regionDeclaration"
+      }
+    },
+    "components": {
+      "$ref": "#/$defs/stringList",
+      "description": "Shared Press components used by the theme."
+    },
+    "scrollContainer": {
+      "description": "False for window scrolling, true for theme-owned scrolling, or region:<name>.",
+      "oneOf": [
+        { "type": "boolean" },
+        { "type": "string", "pattern": "^(window|document|region:[A-Za-z0-9_-]+)$" }
+      ]
+    },
+    "configSchema": {
+      "type": "object",
+      "description": "JSON-schema fragment for theme-specific config.",
+      "additionalProperties": true
+    },
+    "content": {
+      "type": "object",
+      "description": "Content model shapes consumed by the theme.",
+      "required": [
+        "shapes"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "shapes": {
+          "$ref": "#/$defs/contentShapeList"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stringList": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "contentShapeList": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "rawMarkdown",
+          "html",
+          "blocks",
+          "tocTree",
+          "headings",
+          "metadata",
+          "assets",
+          "links"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "regionDeclaration": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "aliases": {
+          "$ref": "#/$defs/stringList"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "viewDeclaration": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "module": {
+          "type": "string"
+        },
+        "handler": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

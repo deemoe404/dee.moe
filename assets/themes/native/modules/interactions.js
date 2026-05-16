@@ -1,19 +1,149 @@
 import { installLightbox } from '../../../js/lightbox.js';
-import { t, withLangParam, getCurrentLang } from '../../../js/i18n.js';
-import { slugifyTab, escapeHtml, getQueryVariable, renderTags, cardImageSrc, fallbackCover, formatDisplayDate, formatBytes, sanitizeImageUrl, renderSkeletonArticle } from '../../../js/utils.js';
-import { attachHoverTooltip } from '../../../js/tags.js';
+import { sanitizeImageUrl, setSafeHtml } from '../../../js/safe-html.js';
+import { slugifyTab, escapeHtml, getQueryVariable, renderTags, cardImageSrc, fallbackCover, formatDisplayDate, formatBytes, renderSkeletonArticle } from '../../../js/utils.js';
+import { attachHoverTooltip } from '../../../js/tags.js?v=press-system-v3.4.16';
 import { prefersReducedMotion, getArticleTitleFromMain } from '../../../js/dom-utils.js';
-import { renderPostMetaCard, renderOutdatedCard } from '../../../js/templates.js';
-import { showErrorOverlay } from '../../../js/errors.js';
-import { renderPostNav } from '../../../js/post-nav.js';
+import { renderPostMetaCard, renderOutdatedCard } from '../../../js/templates.js?v=press-system-v3.4.16';
+import { showErrorOverlay } from '../../../js/errors.js?v=press-system-v3.4.16';
+import { renderPostNav } from '../../../js/post-nav.js?v=press-system-v3.4.16';
 import { hydratePostImages, hydratePostVideos, applyLazyLoadingIn } from '../../../js/post-render.js';
-import { hydrateInternalLinkCards } from '../../../js/link-cards.js';
 import { applyLangHints } from '../../../js/typography.js';
-import { renderNanoPostCardHtml } from '../../../js/components.js';
-import { mountThemeControls, applySavedTheme, bindThemeToggle, bindThemePackPicker, bindPostEditor } from '../../../js/theme.js';
+import { renderPressPostCardHtml } from '../../../js/post-card-html.js';
+import { mountThemeControls, applySavedTheme, bindThemeToggle, bindThemePackPicker, bindPostEditor } from '../../../js/theme.js?v=press-system-v3.4.16';
+import { isEncryptedMarkdown, stripEncryptedBodyForPublicUse } from '../../../js/encrypted-content.js?v=press-system-v3.4.16';
 
 const defaultWindow = typeof window !== 'undefined' ? window : undefined;
 const defaultDocument = typeof document !== 'undefined' ? document : undefined;
+
+let themeI18n = null;
+let activeRegions = null;
+let nativeLinkCardsModulePromise = null;
+
+function loadNativeLinkCardsModule() {
+  if (!nativeLinkCardsModulePromise) {
+    nativeLinkCardsModulePromise = import('../../../js/link-cards.js?v=press-system-v3.4.16').catch((err) => {
+      nativeLinkCardsModulePromise = null;
+      throw err;
+    });
+  }
+  return nativeLinkCardsModulePromise;
+}
+
+async function hydrateInternalLinkCardsFallback(container, options = {}) {
+  try {
+    const mod = await loadNativeLinkCardsModule();
+    if (mod && typeof mod.hydrateInternalLinkCards === 'function') {
+      return mod.hydrateInternalLinkCards(container, options);
+    }
+  } catch (_) {}
+}
+
+function setThemeI18n(context = {}) {
+  themeI18n = context && context.i18n && typeof context.i18n === 'object' ? context.i18n : null;
+  activeRegions = context && context.regions && typeof context.regions === 'object' ? context.regions : null;
+}
+
+function getRegion(name, documentRef = defaultDocument) {
+  const key = String(name || '').trim();
+  if (!key) return null;
+  try {
+    if (activeRegions && typeof activeRegions.get === 'function') {
+      const region = activeRegions.get(key);
+      if (region) return region;
+    }
+  } catch (_) {}
+  try {
+    if (activeRegions && activeRegions[key]) return activeRegions[key];
+  } catch (_) {}
+  if (!documentRef || typeof documentRef.querySelector !== 'function') return null;
+  try {
+    return documentRef.querySelector(`[data-theme-region="${key}"]`);
+  } catch (_) {
+    return null;
+  }
+}
+
+function getMainRegion(documentRef = defaultDocument) {
+  if (activeRegions && activeRegions.main && activeRegions.main.nodeType === 1) return activeRegions.main;
+  if (documentRef && documentRef.querySelector) {
+    const explicit = documentRef.querySelector('[data-theme-region="main"], .native-mainview');
+    if (explicit) return explicit;
+  }
+  const region = getRegion('main', documentRef);
+  if (!region) return null;
+  try {
+    if (region.matches && region.matches('[data-theme-region="main"], .native-mainview')) return region;
+  } catch (_) {}
+  return null;
+}
+
+function getTocRegion(documentRef = defaultDocument) {
+  return getRegion('toc', documentRef) || (documentRef && documentRef.querySelector && documentRef.querySelector('.native-toc')) || null;
+}
+
+function getNavRegion(documentRef = defaultDocument) {
+  return getRegion('nav', documentRef) || (documentRef && documentRef.querySelector && documentRef.querySelector('.native-tabs')) || null;
+}
+
+function getTagsRegion(documentRef = defaultDocument) {
+  return getRegion('tags', documentRef) || (documentRef && documentRef.querySelector && documentRef.querySelector('.native-tagbox')) || null;
+}
+
+function getSearchRegion(documentRef = defaultDocument) {
+  return getRegion('search', documentRef) || (documentRef && documentRef.querySelector && documentRef.querySelector('press-search.native-searchbox, press-search')) || null;
+}
+
+function getSearchInput(documentRef = defaultDocument) {
+  const search = getSearchRegion(documentRef);
+  return (search && search.input) || (search && search.querySelector && search.querySelector('input[type="search"]')) || null;
+}
+
+function getCurrentLang() {
+  const i18n = themeI18n || {};
+  try {
+    if (typeof i18n.getCurrentLang === 'function') return i18n.getCurrentLang();
+    if (typeof i18n.lang === 'string' && i18n.lang.trim()) return i18n.lang.trim();
+  } catch (_) {}
+  try {
+    const lang = defaultDocument && defaultDocument.documentElement && defaultDocument.documentElement.getAttribute('lang');
+    if (lang) return lang;
+  } catch (_) {}
+  try {
+    const url = new URL((defaultWindow && defaultWindow.location && defaultWindow.location.href) || '');
+    const lang = url.searchParams.get('lang');
+    if (lang) return lang;
+  } catch (_) {}
+  return 'en';
+}
+
+function t(key, ...args) {
+  const i18n = themeI18n || {};
+  try {
+    if (typeof i18n.t === 'function') return i18n.t(key, ...args);
+  } catch (_) {}
+  return args.length ? `${key} ${args.join(' ')}` : String(key || '');
+}
+
+function withLangParam(urlStr) {
+  const i18n = themeI18n || {};
+  try {
+    if (typeof i18n.withLangParam === 'function') return i18n.withLangParam(urlStr);
+  } catch (_) {}
+  const raw = String(urlStr || '');
+  const lang = getCurrentLang();
+  try {
+    const win = defaultWindow;
+    const current = new URL((win && win.location && win.location.href) || 'https://example.test/');
+    const url = new URL(raw, current.href);
+    if (lang) url.searchParams.set('lang', lang);
+    if (url.origin === current.origin && url.pathname === current.pathname) return `${url.search}${url.hash}`;
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch (_) {
+    if (!lang) return raw;
+    const joiner = raw.includes('?') ? '&' : '?';
+    return `${raw}${joiner}lang=${encodeURIComponent(lang)}`;
+  }
+}
 
 let hasInitiallyRendered = false;
 let pendingHighlightRaf = 0;
@@ -21,6 +151,23 @@ let tabsResizeTimer = 0;
 let responsiveObserverBound = false;
 let lightboxInstalled = false;
 let masonryHandlersBound = false;
+
+const NATIVE_CARD_CLASSES = {
+  cardClass: 'press-post-card',
+  withCoverClass: 'press-post-card--with-cover',
+  linkClass: '',
+  bodyClass: '',
+  titleClass: 'card-title',
+  excerptClass: 'card-excerpt',
+  metaClass: 'card-meta',
+  dateClass: 'card-date',
+  versionsClass: 'card-versions',
+  draftClass: 'card-draft',
+  separatorClass: 'card-sep',
+  tagsClass: '',
+  metaPosition: 'after-excerpt',
+  wrapCard: 'false'
+};
 
 function getUtility(params = {}, key, fallback) {
   try {
@@ -30,6 +177,82 @@ function getUtility(params = {}, key, fallback) {
   } catch (_) {
     return fallback;
   }
+}
+
+function getRenderedMarkdownBaseDir(params = {}) {
+  try {
+    if (params.baseDir != null) return String(params.baseDir || '');
+    if (params.content && params.content.baseDir != null) return String(params.content.baseDir || '');
+    if (params.ctx && params.ctx.content && params.ctx.content.baseDir != null) return String(params.ctx.content.baseDir || '');
+  } catch (_) {}
+  return '';
+}
+
+function clearElementChildren(target) {
+  if (!target) return;
+  try {
+    if (typeof target.replaceChildren === 'function') {
+      target.replaceChildren();
+      return;
+    }
+  } catch (_) {}
+  try { target.textContent = ''; } catch (_) {
+    try { target.innerHTML = ''; } catch (__) {}
+  }
+}
+
+function moveChildNodes(source, target) {
+  if (!source || !target) return false;
+  let moved = false;
+  try {
+    while (source.firstChild) {
+      target.appendChild(source.firstChild);
+      moved = true;
+    }
+  } catch (_) {}
+  if (!moved && source.childNodes && source.childNodes.length) {
+    try {
+      Array.from(source.childNodes).forEach(node => target.appendChild(node));
+      moved = true;
+    } catch (_) {}
+  }
+  return moved;
+}
+
+function appendTrustedHtml(target, html, documentRef = defaultDocument) {
+  const markup = String(html || '');
+  if (!target || !markup) return false;
+  try {
+    if (documentRef && typeof documentRef.createElement === 'function') {
+      const holder = documentRef.createElement('div');
+      holder.innerHTML = markup;
+      if (moveChildNodes(holder, target)) return true;
+    }
+  } catch (_) {}
+  try {
+    if (typeof target.insertAdjacentHTML === 'function') {
+      target.insertAdjacentHTML('beforeend', markup);
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
+function appendRenderedMarkdownHtml(target, html, baseDir, documentRef = defaultDocument) {
+  const markup = String(html || '');
+  if (!target || !markup) return false;
+  try {
+    if (documentRef && typeof documentRef.createElement === 'function') {
+      const holder = documentRef.createElement('div');
+      setSafeHtml(holder, markup, baseDir, { alreadySanitized: true });
+      return moveChildNodes(holder, target);
+    }
+  } catch (_) {}
+  try {
+    setSafeHtml(target, markup, baseDir, { alreadySanitized: true });
+    return true;
+  } catch (_) {}
+  return false;
 }
 
 function getFetcher(windowRef = defaultWindow) {
@@ -44,17 +267,23 @@ function getContainerByRole(role, documentRef = defaultDocument) {
   try {
     switch (role) {
       case 'main':
-        return documentRef.getElementById('mainview');
+        return getMainRegion(documentRef);
       case 'toc':
-        return documentRef.getElementById('tocview');
+        return getTocRegion(documentRef);
       case 'sidebar':
-        return documentRef.querySelector('.sidebar');
+        return getRegion('sidebar', documentRef) || documentRef.querySelector('.sidebar');
       case 'content':
-        return documentRef.querySelector('.content');
+        return getRegion('content', documentRef) || documentRef.querySelector('.content');
       case 'container': {
         const main = getContainerByRole('main', documentRef);
         return main ? main.closest('.box') : null;
       }
+      case 'search':
+        return getSearchRegion(documentRef);
+      case 'nav':
+        return getNavRegion(documentRef);
+      case 'tags':
+        return getTagsRegion(documentRef);
       default:
         return null;
     }
@@ -127,12 +356,12 @@ function resolveViewContainersNative(params = {}, documentRef = defaultDocument)
 
 function updateSearchPlaceholderNative(params = {}, documentRef = defaultDocument) {
   if (!documentRef) return false;
-  const search = documentRef.querySelector('nano-search');
+  const search = documentRef.querySelector('press-search');
   if (search && typeof search.setPlaceholder === 'function') {
     search.setPlaceholder(params && params.placeholder != null ? String(params.placeholder) : '');
     return true;
   }
-  const input = documentRef.getElementById('searchInput');
+  const input = getSearchInput(documentRef);
   if (!input) return false;
   const placeholder = params && params.placeholder != null ? String(params.placeholder) : '';
   input.setAttribute('placeholder', placeholder);
@@ -154,7 +383,7 @@ function setupThemeControlsNative(params = {}) {
 }
 
 function handleWindowResizeNative(params = {}, documentRef = defaultDocument, windowRef = defaultWindow) {
-  const nav = documentRef ? documentRef.getElementById('tabsNav') : null;
+  const nav = documentRef ? getNavRegion(documentRef) : null;
   if (!nav) return false;
   updateMovingHighlight(nav, windowRef, documentRef);
   return true;
@@ -268,7 +497,7 @@ async function warnLargeImagesInNative(containerSelector, cfg = {}, documentRef 
 
 function bindPostVersionSelectorsNative(documentRef = defaultDocument, windowRef = defaultWindow) {
   try {
-    const root = documentRef ? documentRef.getElementById('mainview') : null;
+    const root = documentRef ? getMainRegion(documentRef) : null;
     if (!root) return;
     const selects = Array.from(root.querySelectorAll('select.post-version-select'));
     if (!selects.length) return;
@@ -475,7 +704,7 @@ function updateLayoutLoadingStateNative(params = {}, documentRef = defaultDocume
   const scope = params.containers && typeof params.containers === 'object' ? params.containers : {};
   const content = scope.contentElement || params.contentElement || (documentRef && documentRef.querySelector('.content'));
   const sidebar = scope.sidebarElement || params.sidebarElement || (documentRef && documentRef.querySelector('.sidebar'));
-  const container = scope.containerElement || params.containerElement || (documentRef && documentRef.getElementById('mainview')?.closest('.box'));
+  const container = scope.containerElement || params.containerElement || (getMainRegion(documentRef) && getMainRegion(documentRef).closest('.box'));
   const extra = Array.isArray(params.extraContentClasses) ? params.extraContentClasses : [];
   const toggle = (element, base = []) => {
     if (!element || !element.classList) return;
@@ -494,7 +723,7 @@ function updateLayoutLoadingStateNative(params = {}, documentRef = defaultDocume
 
 function resetTOCNative(params = {}, documentRef = defaultDocument, windowRef = defaultWindow) {
   const scope = params.containers && typeof params.containers === 'object' ? params.containers : {};
-  const toc = scope.tocElement || params.tocElement || (documentRef ? documentRef.getElementById('tocview') : null);
+  const toc = scope.tocElement || params.tocElement || (documentRef ? getTocRegion(documentRef) : null);
   if (!toc) return false;
   const clear = () => {
     try {
@@ -523,20 +752,21 @@ function resetTOCNative(params = {}, documentRef = defaultDocument, windowRef = 
 
 function renderPostTOCNative(params = {}, documentRef = defaultDocument, windowRef = defaultWindow) {
   const scope = params.containers && typeof params.containers === 'object' ? params.containers : {};
-  const toc = scope.tocElement || params.tocElement || (documentRef ? documentRef.getElementById('tocview') : null);
+  const toc = scope.tocElement || params.tocElement || (documentRef ? getTocRegion(documentRef) : null);
   if (!toc) return false;
   const translate = params.translate || params.translator || t;
   const title = params.articleTitle != null ? String(params.articleTitle) : '';
   const tocHtml = params.tocHtml || '';
+  const baseDir = getRenderedMarkdownBaseDir(params);
   if (typeof toc.renderToc === 'function') {
     try { toc.setAttribute('toggle-label', translate('toc.toggleAria') || 'Toggle section'); } catch (_) {}
     toc.renderToc({
-      variant: 'native',
       articleTitle: title,
       tocHtml,
+      baseDir,
       topLabel: translate('ui.top'),
       topAria: translate('ui.backToTop') || translate('ui.top') || 'Back to top',
-      contentSelector: '#mainview'
+      contentRoot: scope.mainElement || getMainRegion(documentRef)
     });
     return true;
   }
@@ -547,7 +777,9 @@ function renderPostTOCNative(params = {}, documentRef = defaultDocument, windowR
   const topLabel = translate('ui.top');
   const aria = translate('ui.backToTop') || translate('ui.top') || 'Back to top';
   const safeTitle = title ? `<span>${escapeHtml(title)}</span>` : '';
-  toc.innerHTML = `<div class="toc-header">${safeTitle}<button type="button" class="toc-top" aria-label="${escapeHtml(String(aria || 'Back to top'))}">${escapeHtml(String(topLabel || 'Top'))}</button></div>${tocHtml}`;
+  clearElementChildren(toc);
+  appendTrustedHtml(toc, `<div class="toc-header">${safeTitle}<button type="button" class="toc-top" aria-label="${escapeHtml(String(aria || 'Back to top'))}">${escapeHtml(String(topLabel || 'Top'))}</button></div>`, documentRef);
+  appendRenderedMarkdownHtml(toc, tocHtml, baseDir, documentRef);
   const btn = toc.querySelector('.toc-top');
   if (btn) {
     btn.addEventListener('click', (e) => {
@@ -564,7 +796,7 @@ function renderPostTOCNative(params = {}, documentRef = defaultDocument, windowR
 
 function renderErrorStateNative(params = {}, documentRef = defaultDocument) {
   const scope = params.containers && typeof params.containers === 'object' ? params.containers : {};
-  const target = scope.mainElement || params.targetElement || (documentRef ? documentRef.getElementById('mainview') : null);
+  const target = scope.mainElement || params.targetElement || (documentRef ? getMainRegion(documentRef) : null);
   if (!target) return false;
   const variant = String(params.variant || 'error').trim() || 'error';
   const title = params.title != null ? String(params.title) : '';
@@ -595,9 +827,9 @@ function renderErrorStateNative(params = {}, documentRef = defaultDocument) {
 
 function handleViewChangeNative(params = {}, documentRef = defaultDocument, windowRef = defaultWindow) {
   const context = params && params.context && typeof params.context === 'object' ? params.context : {};
-  const search = context.searchElement || params.searchElement || (documentRef ? (documentRef.querySelector('nano-search') || documentRef.getElementById('searchbox')) : null);
-  const tags = context.tagElement || params.tagElement || (documentRef ? documentRef.getElementById('tagview') : null);
-  const input = context.searchInput || params.searchInput || (search && search.input) || (documentRef ? documentRef.getElementById('searchInput') : null);
+  const search = context.searchElement || params.searchElement || (documentRef ? getSearchRegion(documentRef) : null);
+  const tags = context.tagElement || params.tagElement || (documentRef ? getTagsRegion(documentRef) : null);
+  const input = params.searchInput || (search && search.input) || (documentRef ? getSearchInput(documentRef) : null);
   const showSearch = context.showSearch != null ? !!context.showSearch : !!params.showSearch;
   const showTags = context.showTags != null ? !!context.showTags : !!params.showTags;
   const queryValue = context.queryValue != null ? context.queryValue : params.queryValue;
@@ -613,7 +845,7 @@ function handleViewChangeNative(params = {}, documentRef = defaultDocument, wind
   if (input && typeof queryValue === 'string') {
     try { input.value = queryValue; } catch (_) {}
     try {
-      const host = input.closest && input.closest('nano-search');
+      const host = input.closest && input.closest('press-search');
       if (host) host.value = queryValue;
     } catch (_) {}
   }
@@ -637,17 +869,16 @@ function initializeSyntaxHighlightingNative(params = {}) {
 function enhanceIndexLayoutNative(params = {}, documentRef = defaultDocument, windowRef = defaultWindow) {
   const containerEl = params.containerElement || getContainerByRole('main', documentRef);
   const indexEl = params.indexElement || (containerEl ? containerEl.querySelector('.index') : null);
-  const containerSelector = params.containerSelector || (containerEl && containerEl.id ? `#${containerEl.id}` : '#mainview');
-  const indexSelector = params.indexSelector || (containerSelector ? `${containerSelector} .index` : '.index');
+  const indexSelector = params.indexSelector || '.native-mainview .index';
   if (typeof params.hydrateCardCovers === 'function') {
-    try { params.hydrateCardCovers(containerEl || containerSelector); } catch (_) {}
+    try { params.hydrateCardCovers(containerEl || documentRef); } catch (_) {}
   }
   if (typeof params.applyLazyLoadingIn === 'function') {
-    try { params.applyLazyLoadingIn(containerEl || containerSelector); } catch (_) {}
+    try { params.applyLazyLoadingIn(containerEl || documentRef); } catch (_) {}
   }
   try {
     const cfg = (params.siteConfig && params.siteConfig.assetWarnings && params.siteConfig.assetWarnings.largeImage) || {};
-    warnLargeImagesInNative(containerEl || containerSelector, cfg, documentRef, windowRef).catch(() => {});
+    warnLargeImagesInNative(containerEl || documentRef, cfg, documentRef, windowRef).catch(() => {});
   } catch (_) {}
   if (typeof params.setupSearch === 'function') {
     try { params.setupSearch(Array.isArray(params.allEntries) ? params.allEntries : []); } catch (_) {}
@@ -688,7 +919,7 @@ function enhanceIndexLayoutNative(params = {}, documentRef = defaultDocument, wi
 function decoratePostViewNative(params = {}, documentRef = defaultDocument, windowRef = defaultWindow) {
   if (!documentRef) return false;
   const scope = params.containers && typeof params.containers === 'object' ? params.containers : {};
-  const container = scope.mainElement || params.container || documentRef.getElementById('mainview');
+  const container = scope.mainElement || params.container || getMainRegion(documentRef);
   if (!container) return false;
   const translate = params.translate || params.t || t;
   const articleTitle = params.articleTitle != null ? String(params.articleTitle) : '';
@@ -909,8 +1140,8 @@ function renderFooterNavNative(params = {}, documentRef = defaultDocument, windo
 function renderPostLoadingStateNative(params = {}, documentRef = defaultDocument) {
   if (!documentRef) return false;
   const scope = params.containers && typeof params.containers === 'object' ? params.containers : {};
-  const toc = scope.tocElement || params.tocElement || documentRef.getElementById('tocview');
-  const main = scope.mainElement || params.mainElement || documentRef.getElementById('mainview');
+  const toc = scope.tocElement || params.tocElement || getTocRegion(documentRef);
+  const main = scope.mainElement || params.mainElement || getMainRegion(documentRef);
   const translate = params.translator || params.t || t;
   const renderSkeleton = typeof params.renderSkeletonArticle === 'function' ? params.renderSkeletonArticle : renderSkeletonArticle;
   const ensureAutoHeight = typeof params.ensureAutoHeight === 'function' ? params.ensureAutoHeight : (() => {});
@@ -935,7 +1166,7 @@ function renderPostLoadingStateNative(params = {}, documentRef = defaultDocument
 function renderStaticTabLoadingStateNative(params = {}, documentRef = defaultDocument) {
   if (!documentRef) return false;
   const scope = params.containers && typeof params.containers === 'object' ? params.containers : {};
-  const main = scope.mainElement || params.mainElement || documentRef.getElementById('mainview');
+  const main = scope.mainElement || params.mainElement || getMainRegion(documentRef);
   const renderSkeleton = typeof params.renderSkeletonArticle === 'function' ? params.renderSkeletonArticle : renderSkeletonArticle;
   if (main) main.innerHTML = renderSkeleton();
   return !!main;
@@ -944,7 +1175,7 @@ function renderStaticTabLoadingStateNative(params = {}, documentRef = defaultDoc
 function renderPostViewNative(params = {}, documentRef = defaultDocument, windowRef = defaultWindow) {
   if (!documentRef) return { handled: false, title: params && params.fallbackTitle ? String(params.fallbackTitle) : '' };
   const scope = params.containers && typeof params.containers === 'object' ? params.containers : {};
-  const container = scope.mainElement || params.container || documentRef.getElementById('mainview');
+  const container = scope.mainElement || params.container || getMainRegion(documentRef);
   if (!container) return { handled: false, title: params && params.fallbackTitle ? String(params.fallbackTitle) : '' };
 
   const markdownHtml = params.markdownHtml || '';
@@ -976,33 +1207,38 @@ function renderPostViewNative(params = {}, documentRef = defaultDocument, window
   let outdated = '';
   try { outdated = renderOutdatedFn(metadata, siteConfig) || ''; } catch (_) { outdated = ''; }
 
-  container.innerHTML = `${outdated}${topMeta}${markdownHtml}${bottomMeta}`;
+  const markdownBaseDir = getRenderedMarkdownBaseDir(params);
+  clearElementChildren(container);
+  appendTrustedHtml(container, outdated, documentRef);
+  appendTrustedHtml(container, topMeta, documentRef);
+  appendRenderedMarkdownHtml(container, markdownHtml, markdownBaseDir, documentRef);
+  appendTrustedHtml(container, bottomMeta, documentRef);
 
   const renderNav = getUtility(params, 'renderPostNav', renderPostNav);
-  try { renderNav('#mainview', postsIndex, postId); } catch (_) {}
+  try { renderNav(container, postsIndex, postId); } catch (_) {}
 
   const hydrateImages = getUtility(params, 'hydratePostImages', (selector) => hydratePostImages(selector));
-  try { hydrateImages('#mainview'); } catch (_) {}
+  try { hydrateImages(container); } catch (_) {}
 
   const lazyLoad = getUtility(params, 'applyLazyLoadingIn', (selector) => applyLazyLoadingIn(selector));
-  try { lazyLoad('#mainview'); } catch (_) {}
+  try { lazyLoad(container); } catch (_) {}
 
   const langHints = getUtility(params, 'applyLangHints', (selector) => applyLangHints(selector));
-  try { langHints('#mainview'); } catch (_) {}
+  try { langHints(container); } catch (_) {}
 
   const hydrateVideos = getUtility(params, 'hydratePostVideos', (selector) => hydratePostVideos(selector));
-  try { hydrateVideos('#mainview'); } catch (_) {}
+  try { hydrateVideos(container); } catch (_) {}
 
   try {
     const cfg = (siteConfig && siteConfig.assetWarnings && siteConfig.assetWarnings.largeImage) || {};
-    warnLargeImagesInNative('#mainview', cfg, documentRef, windowRef).catch(() => {});
+    warnLargeImagesInNative(container, cfg, documentRef, windowRef).catch(() => {});
   } catch (_) {}
 
-  const hydrateLinks = getUtility(params, 'hydrateInternalLinkCards', (selector, opts) => hydrateInternalLinkCards(selector, opts));
+  const hydrateLinks = getUtility(params, 'hydrateInternalLinkCards', (selector, opts) => hydrateInternalLinkCardsFallback(selector, opts));
   const fetchMarkdown = getUtility(params, 'fetchMarkdown', () => Promise.resolve(''));
   const makeHref = getUtility(params, 'makeLangHref', (loc) => withLangParam(`?id=${encodeURIComponent(loc)}`));
   try {
-    hydrateLinks('#mainview', {
+    hydrateLinks(container, {
       allowedLocations,
       locationAliasMap,
       postsByLocationTitle,
@@ -1024,10 +1260,10 @@ function renderPostViewNative(params = {}, documentRef = defaultDocument, window
   });
 
   const tocHtml = params.tocHtml || '';
-  const tocElement = documentRef.getElementById('tocview');
+  const tocElement = getTocRegion(documentRef);
   const { headingEl: firstHeadingEl, headingText: firstHeadingText } = (() => {
     try {
-      const el = documentRef.querySelector('#mainview h1, #mainview h2, #mainview h3');
+      const el = container.querySelector('h1, h2, h3');
       if (!el) return { headingEl: null, headingText: '' };
       const clone = el.cloneNode(true);
       const anchors = clone.querySelectorAll('a.anchor');
@@ -1084,34 +1320,34 @@ function renderPostViewNative(params = {}, documentRef = defaultDocument, window
 function renderStaticTabViewNative(params = {}, documentRef = defaultDocument, windowRef = defaultWindow) {
   if (!documentRef) return { handled: false, title: params && params.tab && params.tab.title ? String(params.tab.title) : '' };
   const scope = params.containers && typeof params.containers === 'object' ? params.containers : {};
-  const container = scope.mainElement || params.container || documentRef.getElementById('mainview');
+  const container = scope.mainElement || params.container || getMainRegion(documentRef);
   if (!container) return { handled: false, title: params && params.tab && params.tab.title ? String(params.tab.title) : '' };
 
   const markdownHtml = params.markdownHtml || '';
-  container.innerHTML = markdownHtml;
+  setSafeHtml(container, markdownHtml, getRenderedMarkdownBaseDir(params), { alreadySanitized: true });
 
   const hydrateImages = getUtility(params, 'hydratePostImages', (selector) => hydratePostImages(selector));
-  try { hydrateImages('#mainview'); } catch (_) {}
+  try { hydrateImages(container); } catch (_) {}
 
   const lazyLoad = getUtility(params, 'applyLazyLoadingIn', (selector) => applyLazyLoadingIn(selector));
-  try { lazyLoad('#mainview'); } catch (_) {}
+  try { lazyLoad(container); } catch (_) {}
 
   const langHints = getUtility(params, 'applyLangHints', (selector) => applyLangHints(selector));
-  try { langHints('#mainview'); } catch (_) {}
+  try { langHints(container); } catch (_) {}
 
   const hydrateVideos = getUtility(params, 'hydratePostVideos', (selector) => hydratePostVideos(selector));
-  try { hydrateVideos('#mainview'); } catch (_) {}
+  try { hydrateVideos(container); } catch (_) {}
 
   try {
     const cfg = (params.siteConfig && params.siteConfig.assetWarnings && params.siteConfig.assetWarnings.largeImage) || {};
-    warnLargeImagesInNative('#mainview', cfg, documentRef, windowRef).catch(() => {});
+    warnLargeImagesInNative(container, cfg, documentRef, windowRef).catch(() => {});
   } catch (_) {}
 
-  const hydrateLinks = getUtility(params, 'hydrateInternalLinkCards', (selector, opts) => hydrateInternalLinkCards(selector, opts));
+  const hydrateLinks = getUtility(params, 'hydrateInternalLinkCards', (selector, opts) => hydrateInternalLinkCardsFallback(selector, opts));
   const fetchMarkdown = getUtility(params, 'fetchMarkdown', () => Promise.resolve(''));
   const makeHref = getUtility(params, 'makeLangHref', (loc) => withLangParam(`?id=${encodeURIComponent(loc)}`));
   try {
-    hydrateLinks('#mainview', {
+    hydrateLinks(container, {
       allowedLocations: params.allowedLocations || new Set(),
       locationAliasMap: params.locationAliasMap || new Map(),
       postsByLocationTitle: params.postsByLocationTitle || {},
@@ -1123,7 +1359,7 @@ function renderStaticTabViewNative(params = {}, documentRef = defaultDocument, w
     });
   } catch (_) {}
 
-  const tocElement = documentRef.getElementById('tocview');
+  const tocElement = getTocRegion(documentRef);
   if (tocElement) {
     try { hideElementNative({ element: tocElement }, windowRef); } catch (_) { try { tocElement.style.display = 'none'; } catch (_) {} }
     try {
@@ -1202,7 +1438,7 @@ function resolveCoverSource(value = {}, siteConfig = {}) {
 function renderIndexViewNative(params = {}, documentRef = defaultDocument, windowRef = defaultWindow) {
   if (!documentRef) return false;
   const scope = params.containers && typeof params.containers === 'object' ? params.containers : {};
-  const container = scope.mainElement || params.container || documentRef.getElementById('mainview');
+  const container = scope.mainElement || params.container || getMainRegion(documentRef);
   if (!container) return false;
   const pageEntries = Array.isArray(params.pageEntries) ? params.pageEntries : [];
   const totalPages = Math.max(1, parseInt(params.totalPages || 1, 10));
@@ -1222,10 +1458,13 @@ function renderIndexViewNative(params = {}, documentRef = defaultDocument, windo
     const dateLabel = hasDate ? formatDisplayDate(value.date) : '';
     const verCount = (value && Array.isArray(value.versions)) ? value.versions.length : 0;
     const versionsLabel = verCount > 1 ? translate('ui.versionsCount', verCount) : '';
-    const draftLabel = (value && value.draft) ? translate('ui.draftBadge') : '';
+    const protectedLabel = (value && value.protected) ? translate('ui.protectedBadge') : '';
+    const draftLabel = [
+      protectedLabel,
+      (value && value.draft) ? translate('ui.draftBadge') : ''
+    ].filter(Boolean).join(' / ');
     const href = makeLangUrl(`?id=${encodeURIComponent(value && value.location ? String(value.location) : '')}`);
-    html += renderNanoPostCardHtml({
-      variant: 'native',
+    html += renderPressPostCardHtml({
       title: String(key || ''),
       href,
       dataIdx: encodeURIComponent(key),
@@ -1233,7 +1472,8 @@ function renderIndexViewNative(params = {}, documentRef = defaultDocument, windo
       versionsLabel,
       draftLabel,
       coverHtml: cover,
-      tagsHtml: tag
+      tagsHtml: tag,
+      classes: NATIVE_CARD_CLASSES
     });
   }
   html += '</div>';
@@ -1258,58 +1498,91 @@ function updateCardMetadata(entries = [], context = {}) {
   if (!documentRef) return;
   const translate = context.translate || t;
   const cards = Array.from(documentRef.querySelectorAll('.index a'));
+  const readMinutesFromMeta = (meta) => {
+    const raw = meta && (meta.readTime != null ? meta.readTime : (meta.minutes != null ? meta.minutes : meta.readMinutes));
+    const minutes = Number(raw);
+    return Number.isFinite(minutes) && minutes > 0 ? Math.ceil(minutes) : 0;
+  };
+  const refreshMasonry = (el) => {
+    if (typeof context.updateMasonryItem !== 'function') return;
+    const container = documentRef.querySelector('.index');
+    if (container && el) context.updateMasonryItem(container, el);
+  };
+  const updateMetaLine = (el, meta, minutes, encrypted = false) => {
+    const metaEl = el.querySelector('.card-meta');
+    if (!metaEl) return;
+    const items = [];
+    const dateEl = metaEl.querySelector('.card-date');
+    if (dateEl && dateEl.textContent.trim()) items.push(dateEl.cloneNode(true));
+    if (encrypted) {
+      const p = documentRef.createElement('span');
+      p.className = 'card-draft';
+      p.textContent = translate('ui.protectedBadge');
+      items.push(p);
+    } else if (minutes > 0) {
+      const read = documentRef.createElement('span');
+      read.className = 'card-read';
+      read.textContent = `${minutes} ${translate('ui.minRead')}`;
+      items.push(read);
+    }
+    const verCount = (meta && Array.isArray(meta.versions)) ? meta.versions.length : 0;
+    if (verCount > 1) {
+      const v = documentRef.createElement('span');
+      v.className = 'card-versions';
+      v.setAttribute('title', translate('ui.versionLabel'));
+      v.textContent = translate('ui.versionsCount', verCount);
+      items.push(v);
+    }
+    if (meta && meta.draft) {
+      const d = documentRef.createElement('span');
+      d.className = 'card-draft';
+      d.textContent = translate('ui.draftBadge');
+      items.push(d);
+    }
+    metaEl.textContent = '';
+    items.forEach((node, nodeIdx) => {
+      if (nodeIdx > 0) {
+        const sep = documentRef.createElement('span');
+        sep.className = 'card-sep';
+        sep.textContent = '•';
+        metaEl.appendChild(sep);
+      }
+      metaEl.appendChild(node);
+    });
+  };
   entries.forEach(([title, meta], idx) => {
     const loc = meta && meta.location ? String(meta.location) : '';
     if (!loc) return;
     const el = cards[idx];
     if (!el) return;
     const exEl = el.querySelector('.card-excerpt');
-    if (exEl && meta && meta.excerpt) {
-      try { exEl.textContent = String(meta.excerpt); } catch (_) {}
+    const inlineExcerpt = meta && meta.excerpt != null ? String(meta.excerpt).trim() : '';
+    if (exEl && inlineExcerpt) {
+      try { exEl.textContent = inlineExcerpt; } catch (_) {}
+    }
+    if (meta && meta.protected) {
+      if (exEl && !inlineExcerpt) {
+        try { exEl.textContent = translate('ui.protectedExcerpt'); } catch (_) {}
+      }
+      updateMetaLine(el, meta, 0, true);
+      refreshMasonry(el);
+      return;
+    }
+    const inlineMinutes = readMinutesFromMeta(meta);
+    if (inlineMinutes > 0) {
+      updateMetaLine(el, meta, inlineMinutes, false);
+      refreshMasonry(el);
     }
     if (typeof context.getFile !== 'function' || typeof context.getContentRoot !== 'function' || typeof context.extractExcerpt !== 'function' || typeof context.computeReadTime !== 'function') return;
     context.getFile(`${context.getContentRoot()}/${loc}`).then(md => {
-      const ex = context.extractExcerpt(md, 50);
-      if (exEl && !(meta && meta.excerpt)) exEl.textContent = ex;
-      const minutes = context.computeReadTime(md, 200);
-      const metaEl = el.querySelector('.card-meta');
-      if (metaEl) {
-        const items = [];
-        const dateEl = metaEl.querySelector('.card-date');
-        if (dateEl && dateEl.textContent.trim()) items.push(dateEl.cloneNode(true));
-        const read = documentRef.createElement('span');
-        read.className = 'card-read';
-        read.textContent = `${minutes} ${translate('ui.minRead')}`;
-        items.push(read);
-        const verCount = (meta && Array.isArray(meta.versions)) ? meta.versions.length : 0;
-        if (verCount > 1) {
-          const v = documentRef.createElement('span');
-          v.className = 'card-versions';
-          v.setAttribute('title', translate('ui.versionLabel'));
-          v.textContent = translate('ui.versionsCount', verCount);
-          items.push(v);
-        }
-        if (meta && meta.draft) {
-          const d = documentRef.createElement('span');
-          d.className = 'card-draft';
-          d.textContent = translate('ui.draftBadge');
-          items.push(d);
-        }
-        metaEl.textContent = '';
-        items.forEach((node, nodeIdx) => {
-          if (nodeIdx > 0) {
-            const sep = documentRef.createElement('span');
-            sep.className = 'card-sep';
-            sep.textContent = '•';
-            metaEl.appendChild(sep);
-          }
-          metaEl.appendChild(node);
-        });
-      }
-      if (typeof context.updateMasonryItem === 'function') {
-        const container = documentRef.querySelector('.index');
-        if (container && el) context.updateMasonryItem(container, el);
-      }
+      const rawMarkdown = String(md || '');
+      const encrypted = isEncryptedMarkdown(rawMarkdown);
+      const publicMarkdown = encrypted ? stripEncryptedBodyForPublicUse(rawMarkdown) : rawMarkdown;
+      const ex = encrypted ? translate('ui.protectedExcerpt') : context.extractExcerpt(publicMarkdown, 50);
+      if (exEl && (encrypted || !inlineExcerpt)) exEl.textContent = ex;
+      const minutes = encrypted ? 0 : (inlineMinutes > 0 ? inlineMinutes : context.computeReadTime(publicMarkdown, 200));
+      updateMetaLine(el, meta, minutes, encrypted);
+      refreshMasonry(el);
     }).catch(() => {});
   });
 }
@@ -1323,7 +1596,7 @@ function afterIndexRenderNative(params = {}, documentRef = defaultDocument) {
 function renderSearchResultsNative(params = {}, documentRef = defaultDocument, windowRef = defaultWindow) {
   if (!documentRef) return false;
   const scope = params.containers && typeof params.containers === 'object' ? params.containers : {};
-  const container = scope.mainElement || params.container || documentRef.getElementById('mainview');
+  const container = scope.mainElement || params.container || getMainRegion(documentRef);
   if (!container) return false;
   const entries = Array.isArray(params.entries) ? params.entries : [];
   const total = parseInt(params.total || entries.length, 10);
@@ -1355,10 +1628,13 @@ function renderSearchResultsNative(params = {}, documentRef = defaultDocument, w
     const dateLabel = hasDate ? formatDisplayDate(value.date) : '';
     const verCount = (value && Array.isArray(value.versions)) ? value.versions.length : 0;
     const versionsLabel = verCount > 1 ? translate('ui.versionsCount', verCount) : '';
-    const draftLabel = (value && value.draft) ? translate('ui.draftBadge') : '';
+    const protectedLabel = (value && value.protected) ? translate('ui.protectedBadge') : '';
+    const draftLabel = [
+      protectedLabel,
+      (value && value.draft) ? translate('ui.draftBadge') : ''
+    ].filter(Boolean).join(' / ');
     const href = makeLangUrl(`?id=${encodeURIComponent(value && value.location ? String(value.location) : '')}`);
-    html += renderNanoPostCardHtml({
-      variant: 'native',
+    html += renderPressPostCardHtml({
       title: String(key || ''),
       href,
       dataIdx: encodeURIComponent(key),
@@ -1366,7 +1642,8 @@ function renderSearchResultsNative(params = {}, documentRef = defaultDocument, w
       versionsLabel,
       draftLabel,
       coverHtml: cover,
-      tagsHtml: tag
+      tagsHtml: tag,
+      classes: NATIVE_CARD_CLASSES
     });
   }
   html += '</div>';
@@ -1396,8 +1673,8 @@ function afterSearchRenderNative(params = {}, documentRef = defaultDocument) {
 }
 
 function getHomeSlug(tabs, windowRef = defaultWindow) {
-  if (windowRef && typeof windowRef.__ns_get_home_slug === 'function') {
-    try { return windowRef.__ns_get_home_slug(); } catch (_) {}
+  if (windowRef && typeof windowRef.__press_get_home_slug === 'function') {
+    try { return windowRef.__press_get_home_slug(); } catch (_) {}
   }
   if (tabs && typeof tabs === 'object') {
     if (tabs.posts) return 'posts';
@@ -1408,8 +1685,8 @@ function getHomeSlug(tabs, windowRef = defaultWindow) {
 }
 
 function postsEnabled(windowRef = defaultWindow) {
-  if (windowRef && typeof windowRef.__ns_posts_enabled === 'function') {
-    try { return !!windowRef.__ns_posts_enabled(); } catch (_) {}
+  if (windowRef && typeof windowRef.__press_posts_enabled === 'function') {
+    try { return !!windowRef.__press_posts_enabled(); } catch (_) {}
   }
   return true;
 }
@@ -1575,7 +1852,7 @@ function setTrackHtml(nav, markup, documentRef = defaultDocument, windowRef = de
 function renderTabsNative(params = {}) {
   const windowRef = params.window || defaultWindow;
   const documentRef = params.document || defaultDocument;
-  const nav = params.nav || (documentRef ? documentRef.getElementById('tabsNav') : null);
+  const nav = params.nav || (documentRef ? getNavRegion(documentRef) : null);
   if (!nav) return;
   const tabs = params.tabsBySlug || {};
   const activeSlug = params.activeSlug;
@@ -1759,8 +2036,8 @@ function renderTabsNative(params = {}) {
 
 function addTabClickAnimation(tab, windowRef = defaultWindow) {
   if (!tab || !tab.classList || !tab.classList.contains('tab')) return;
-  const nav = tab.closest('#tabsNav');
-  if (nav && nav.id === 'tabsNav') {
+  const nav = tab.closest('[data-theme-region="nav"], .native-tabs, .tabs');
+  if (nav) {
     const currentActive = nav.querySelector('.tab.active');
     if (currentActive && currentActive !== tab) {
       currentActive.classList.add('deactivating');
@@ -1798,7 +2075,8 @@ function setupResponsiveTabsObserverNative(params = {}) {
   const getCurrentPostTitle = () => {
     if (!documentRef) return '';
     try {
-      const el = documentRef.querySelector('#mainview .post-meta-card .post-meta-title');
+      const main = getMainRegion(documentRef);
+      const el = main && main.querySelector('.post-meta-card .post-meta-title');
       const txt = (el && el.textContent) ? el.textContent.trim() : '';
       if (txt) return txt;
     } catch (_) {}
@@ -1836,6 +2114,7 @@ function setupResponsiveTabsObserverNative(params = {}) {
 }
 
 export function mount(context = {}) {
+  setThemeI18n(context);
   const windowRef = context.window || defaultWindow;
   const documentRef = context.document || defaultDocument;
 
@@ -1846,49 +2125,74 @@ export function mount(context = {}) {
   masonryHandlersBound = false;
 
   if (!lightboxInstalled) {
-    try { installLightbox({ root: '#mainview' }); lightboxInstalled = true; } catch (_) {}
+    try { installLightbox({ rootRegion: ['main'] }); lightboxInstalled = true; } catch (_) {}
   }
 
-  const hooks = (windowRef && windowRef.__ns_themeHooks) || {};
-  hooks.getViewContainer = (params = {}) => getContainerByRole(params.role, documentRef);
-  hooks.resolveViewContainers = (params = {}) => resolveViewContainersNative(params, documentRef);
-  hooks.getScrollState = () => getScrollStateNative(documentRef, windowRef);
-  hooks.restoreScrollState = (params = {}) => restoreScrollStateNative(params, documentRef, windowRef);
-  hooks.showElement = (params = {}) => showElementNative(params, windowRef);
-  hooks.hideElement = (params = {}) => hideElementNative(params, windowRef);
-  hooks.renderSiteLinks = (params = {}) => renderSiteLinksNative(params, documentRef);
-  hooks.renderSiteIdentity = (params = {}) => renderSiteIdentityNative(params, documentRef, windowRef);
-  hooks.renderFooterNav = (params = {}) => renderFooterNavNative(params, documentRef, windowRef);
-  hooks.renderTabs = (params = {}) => renderTabsNative({ ...params, window: windowRef, document: documentRef });
-  hooks.updateTabHighlight = (nav) => updateMovingHighlight(nav, windowRef, documentRef);
-  hooks.ensureTabOverlay = (nav) => ensureHighlightOverlay(nav, documentRef);
-  hooks.setupResponsiveTabsObserver = (params = {}) => setupResponsiveTabsObserverNative({ ...params, window: windowRef, document: documentRef });
-  hooks.onTabClick = (tab) => addTabClickAnimation(tab, windowRef);
-  hooks.handleWindowResize = (params = {}) => handleWindowResizeNative(params, documentRef, windowRef);
-  hooks.updateLayoutLoadingState = (params = {}) => updateLayoutLoadingStateNative(params, documentRef);
-  hooks.renderPostTOC = (params = {}) => renderPostTOCNative(params, documentRef, windowRef);
-  hooks.renderErrorState = (params = {}) => renderErrorStateNative(params, documentRef);
-  hooks.handleViewChange = (params = {}) => handleViewChangeNative(params, documentRef, windowRef);
-  hooks.renderTagSidebar = (params = {}) => renderTagSidebarNative(params, documentRef);
-  hooks.initializeSyntaxHighlighting = (params = {}) => initializeSyntaxHighlightingNative(params);
-  hooks.updateSearchPlaceholder = (params = {}) => updateSearchPlaceholderNative(params, documentRef);
-  hooks.renderPostLoadingState = (params = {}) => renderPostLoadingStateNative(params, documentRef);
-  hooks.renderPostView = (params = {}) => renderPostViewNative(params, documentRef, windowRef);
-  hooks.renderStaticTabLoadingState = (params = {}) => renderStaticTabLoadingStateNative(params, documentRef);
-  hooks.renderStaticTabView = (params = {}) => renderStaticTabViewNative(params, documentRef, windowRef);
-  hooks.renderIndexView = (params = {}) => renderIndexViewNative(params, documentRef, windowRef);
-  hooks.afterIndexRender = (params = {}) => afterIndexRenderNative(params, documentRef);
-  hooks.renderSearchResults = (params = {}) => renderSearchResultsNative(params, documentRef, windowRef);
-  hooks.afterSearchRender = (params = {}) => afterSearchRenderNative(params, documentRef);
-  hooks.enhanceIndexLayout = (params = {}) => enhanceIndexLayoutNative(params, documentRef, windowRef);
-  hooks.decoratePostView = (params = {}) => decoratePostViewNative(params, documentRef, windowRef);
-  hooks.handleDocumentClick = (params = {}) => handleDocumentClickNative(params, documentRef, windowRef);
-  hooks.resetTOC = (params = {}) => resetTOCNative(params, documentRef, windowRef);
-  hooks.setupThemeControls = (params = {}) => setupThemeControlsNative(params);
-  hooks.resetThemeControls = (params = {}) => resetThemeControlsNative(params, documentRef);
-  hooks.reflectThemeConfig = (params = {}) => reflectThemeConfigNative(params, documentRef);
-  hooks.setupFooter = (params = {}) => setupFooterNative(params, documentRef, windowRef);
-  if (windowRef) windowRef.__ns_themeHooks = hooks;
+  const effects = {};
+  effects.getViewContainer = (params = {}) => getContainerByRole(params.role, documentRef);
+  effects.resolveViewContainers = (params = {}) => resolveViewContainersNative(params, documentRef);
+  effects.getScrollState = () => getScrollStateNative(documentRef, windowRef);
+  effects.restoreScrollState = (params = {}) => restoreScrollStateNative(params, documentRef, windowRef);
+  effects.showElement = (params = {}) => showElementNative(params, windowRef);
+  effects.hideElement = (params = {}) => hideElementNative(params, windowRef);
+  effects.renderSiteLinks = (params = {}) => renderSiteLinksNative(params, documentRef);
+  effects.renderSiteIdentity = (params = {}) => renderSiteIdentityNative(params, documentRef, windowRef);
+  effects.renderFooterNav = (params = {}) => renderFooterNavNative(params, documentRef, windowRef);
+  effects.renderTabs = (params = {}) => renderTabsNative({ ...params, window: windowRef, document: documentRef });
+  effects.updateTabHighlight = (nav) => updateMovingHighlight(nav, windowRef, documentRef);
+  effects.ensureTabOverlay = (nav) => ensureHighlightOverlay(nav, documentRef);
+  effects.setupResponsiveTabsObserver = (params = {}) => setupResponsiveTabsObserverNative({ ...params, window: windowRef, document: documentRef });
+  effects.onTabClick = (tab) => addTabClickAnimation(tab, windowRef);
+  effects.handleWindowResize = (params = {}) => handleWindowResizeNative(params, documentRef, windowRef);
+  effects.updateLayoutLoadingState = (params = {}) => updateLayoutLoadingStateNative(params, documentRef);
+  effects.renderPostTOC = (params = {}) => renderPostTOCNative(params, documentRef, windowRef);
+  effects.renderErrorState = (params = {}) => renderErrorStateNative(params, documentRef);
+  effects.handleViewChange = (params = {}) => handleViewChangeNative(params, documentRef, windowRef);
+  effects.renderTagSidebar = (params = {}) => renderTagSidebarNative(params, documentRef);
+  effects.initializeSyntaxHighlighting = (params = {}) => initializeSyntaxHighlightingNative(params);
+  effects.updateSearchPlaceholder = (params = {}) => updateSearchPlaceholderNative(params, documentRef);
+  effects.renderPostLoadingState = (params = {}) => renderPostLoadingStateNative(params, documentRef);
+  effects.renderPostView = (params = {}) => renderPostViewNative(params, documentRef, windowRef);
+  effects.renderStaticTabLoadingState = (params = {}) => renderStaticTabLoadingStateNative(params, documentRef);
+  effects.renderStaticTabView = (params = {}) => renderStaticTabViewNative(params, documentRef, windowRef);
+  effects.renderIndexView = (params = {}) => renderIndexViewNative(params, documentRef);
+  effects.afterIndexRender = (params = {}) => afterIndexRenderNative(params, documentRef);
+  effects.renderSearchResults = (params = {}) => renderSearchResultsNative(params, documentRef, windowRef);
+  effects.afterSearchRender = (params = {}) => afterSearchRenderNative(params, documentRef);
+  effects.enhanceIndexLayout = (params = {}) => enhanceIndexLayoutNative(params, documentRef, windowRef);
+  effects.decoratePostView = (params = {}) => decoratePostViewNative(params, documentRef, windowRef);
+  effects.handleDocumentClick = (params = {}) => handleDocumentClickNative(params, documentRef, windowRef);
+  effects.resetTOC = (params = {}) => resetTOCNative(params, documentRef, windowRef);
+  effects.setupThemeControls = (params = {}) => setupThemeControlsNative(params);
+  effects.resetThemeControls = (params = {}) => resetThemeControlsNative(params, documentRef);
+  effects.reflectThemeConfig = (params = {}) => reflectThemeConfigNative(params, documentRef);
+  effects.setupFooter = (params = {}) => setupFooterNative(params, documentRef, windowRef);
 
-  return context;
+  const views = {
+    post: effects.renderPostView,
+    posts: effects.renderIndexView,
+    search: effects.renderSearchResults,
+    tab: effects.renderStaticTabView,
+    error: effects.renderErrorState,
+    loading: (params = {}) => (
+      params.view === 'tab'
+        ? effects.renderStaticTabLoadingState(params)
+        : effects.renderPostLoadingState(params)
+    )
+  };
+
+  return {
+    views,
+    components: {},
+    effects
+  };
 }
+
+export default {
+  mount,
+  unmount() {},
+  regions: {},
+  views: {},
+  components: {},
+  effects: {}
+};

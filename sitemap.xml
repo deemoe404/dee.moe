@@ -61,17 +61,17 @@
             <priority>1.0</priority>
           </url>
             <url>
-              <loc>https://dee.moe/?id=post%2Fshanghai2025%2Fmain.md&amp;lang=zh</loc>
-              <xhtml:link rel="alternate" hreflang="zh" href="https://dee.moe/?id=post%2Fshanghai2025%2Fmain.md&amp;lang=zh"/>
-              <xhtml:link rel="alternate" hreflang="x-default" href="https://dee.moe/?id=post%2Fshanghai2025%2Fmain.md&amp;lang=zh"/>
+              <loc>https://dee.moe/?id=post%2Fshanghai2025%2Fmain.md&amp;lang=chs</loc>
+              <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://dee.moe/?id=post%2Fshanghai2025%2Fmain.md&amp;lang=chs"/>
+              <xhtml:link rel="alternate" hreflang="x-default" href="https://dee.moe/?id=post%2Fshanghai2025%2Fmain.md&amp;lang=chs"/>
               <lastmod>2026-05-05</lastmod>
               <changefreq>monthly</changefreq>
               <priority>0.8</priority>
             </url>
               <url>
-                <loc>https://dee.moe/?id=post%2Fnanosite.md&amp;lang=zh</loc>
-                <xhtml:link rel="alternate" hreflang="zh" href="https://dee.moe/?id=post%2Fnanosite.md&amp;lang=zh"/>
-                <xhtml:link rel="alternate" hreflang="x-default" href="https://dee.moe/?id=post%2Fnanosite.md&amp;lang=zh"/>
+                <loc>https://dee.moe/?id=post%2Fnanosite.md&amp;lang=chs</loc>
+                <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://dee.moe/?id=post%2Fnanosite.md&amp;lang=chs"/>
+                <xhtml:link rel="alternate" hreflang="x-default" href="https://dee.moe/?id=post%2Fnanosite.md&amp;lang=chs"/>
                 <lastmod>2026-05-05</lastmod>
                 <changefreq>monthly</changefreq>
                 <priority>0.8</priority>
@@ -109,9 +109,9 @@
                         <priority>0.8</priority>
                       </url>
                         <url>
-                          <loc>https://dee.moe/?id=post%2Fwin11_forgy.md&amp;lang=zh</loc>
-                          <xhtml:link rel="alternate" hreflang="zh" href="https://dee.moe/?id=post%2Fwin11_forgy.md&amp;lang=zh"/>
-                          <xhtml:link rel="alternate" hreflang="x-default" href="https://dee.moe/?id=post%2Fwin11_forgy.md&amp;lang=zh"/>
+                          <loc>https://dee.moe/?id=post%2Fwin11_forgy.md&amp;lang=chs</loc>
+                          <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://dee.moe/?id=post%2Fwin11_forgy.md&amp;lang=chs"/>
+                          <xhtml:link rel="alternate" hreflang="x-default" href="https://dee.moe/?id=post%2Fwin11_forgy.md&amp;lang=chs"/>
                           <lastmod>2026-05-05</lastmod>
                           <changefreq>monthly</changefreq>
                           <priority>0.8</priority>
@@ -143,16 +143,16 @@
                                 <url>
                                   <loc>https://dee.moe/?tab=about&amp;lang=en</loc>
                                   <xhtml:link rel="alternate" hreflang="en" href="https://dee.moe/?tab=about&amp;lang=en"/>
-                                  <xhtml:link rel="alternate" hreflang="zh" href="https://dee.moe/?tab=about&amp;lang=zh"/>
+                                  <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://dee.moe/?tab=about&amp;lang=chs"/>
                                   <xhtml:link rel="alternate" hreflang="x-default" href="https://dee.moe/?tab=about"/>
                                   <lastmod>2026-05-05</lastmod>
                                   <changefreq>monthly</changefreq>
                                   <priority>0.6</priority>
                                 </url>
                                   <url>
-                                    <loc>https://dee.moe/?tab=about&amp;lang=zh</loc>
+                                    <loc>https://dee.moe/?tab=about&amp;lang=chs</loc>
                                     <xhtml:link rel="alternate" hreflang="en" href="https://dee.moe/?tab=about&amp;lang=en"/>
-                                    <xhtml:link rel="alternate" hreflang="zh" href="https://dee.moe/?tab=about&amp;lang=zh"/>
+                                    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://dee.moe/?tab=about&amp;lang=chs"/>
                                     <xhtml:link rel="alternate" hreflang="x-default" href="https://dee.moe/?tab=about"/>
                                     <lastmod>2026-05-05</lastmod>
                                     <changefreq>monthly</changefreq>

@@ -1,9 +1,9 @@
 # yaml-language-server: $schema=../assets/schema/index.json
 
 shanghai2025:
-  zh: post/shanghai2025/main.md
+  chs: post/shanghai2025/main.md
 nanosite:
-  zh: post/nanosite.md
+  chs: post/nanosite.md
 headless:
   en: post/headless/main.md
 volcal_baseline:
@@ -13,6 +13,6 @@ xr2023:
 rmcv:
   en: post/introducing-rmcv/main.md
 win11_forgy:
-  zh: post/win11_forgy.md
+  chs: post/win11_forgy.md
 frogy:
   en: post/frogy/main.md

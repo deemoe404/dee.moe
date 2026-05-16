@@ -14,6 +14,6 @@ About:
   en:
     title: About
     location: tab/about/en.md
-  zh:
+  chs:
     title: 关于
     location: tab/about/zh.md

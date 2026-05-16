@@ -4,10 +4,16 @@ gallery:
   en:
     title: Gallery
     location: tab/gallery.md
+  chs:
+    title: 画廊
+    location: tab/gallery.md
 
 publications:
   en:
     title: Publications
+    location: tab/publications.md
+  chs:
+    title: 出版物
     location: tab/publications.md
 
 About:

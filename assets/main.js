@@ -104,7 +104,7 @@ function loadMathRenderModule() {
 
 function loadAnnotateModule() {
   return cacheDynamicImport(
-    () => import('./js/annotate.js?v=press-system-v3.4.16'),
+    () => import('./js/annotate.js?v=press-system-v3.4.16-annotate-source-v2'),
     () => annotateModulePromise,
     (promise) => { annotateModulePromise = promise; }
   );

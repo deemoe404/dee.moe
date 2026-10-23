@@ -5881,7 +5881,7 @@ function buildDefaultIndexHtml(metaBlock, lang) {
   html += '  <link rel="stylesheet" id="theme-pack">\n';
   html += '</head>\n\n';
   html += '<body>\n';
-  html += '  <script type="module" src="assets/main.js?v=press-system-v3.4.16"></script>\n';
+  html += '  <script type="module" src="assets/main.js?v=press-system-v3.4.16-annotate-source-v3"></script>\n';
   html += '</body>\n\n';
   html += '</html>\n';
   return html;

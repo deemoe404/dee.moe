@@ -369,6 +369,12 @@ export function mountAnnotateComments(options = {}) {
     grant: readStoredGrant(windowRef, config, sourceKey),
     comments: []
   };
+  let disposed = false;
+  let loginPopup = null;
+
+  function isCurrentGrant(grant) {
+    return !disposed && state.grant === grant;
+  }
 
   function setStatus(message) {
     status.textContent = message || '';
@@ -386,15 +392,17 @@ export function mountAnnotateComments(options = {}) {
       category: config.discussionCategory,
       ...buildAnnotateCommentPayload({ context, body, replyToId })
     };
+    const requestGrant = state.grant;
     const response = await fetchImpl(`${config.connectBaseUrl}/api/annotate/comments`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${state.grant}`
+        authorization: `Bearer ${requestGrant}`
       },
       referrerPolicy: 'unsafe-url',
       body: JSON.stringify(payload)
     });
+    if (!isCurrentGrant(requestGrant)) return response.ok;
     if (response.status === 401) {
       clearStoredGrant(windowRef, config, sourceKey);
       state.grant = '';
@@ -403,6 +411,7 @@ export function mountAnnotateComments(options = {}) {
     }
     if (!response.ok) {
       const code = await responseErrorCode(response);
+      if (!isCurrentGrant(requestGrant)) return false;
       if (shouldClearAnnotateGrant(response, code)) {
         clearStoredGrant(windowRef, config, sourceKey);
         state.grant = '';
@@ -444,31 +453,33 @@ export function mountAnnotateComments(options = {}) {
   }
 
   async function loadComments() {
+    let requestGrant = state.grant;
     setStatus('Loading comments...');
     try {
       let response = await fetchImpl(
         buildAnnotateCommentsUrl(config, context),
-        annotateRequestInit({ method: 'GET' }, state.grant)
+        annotateRequestInit({ method: 'GET' }, requestGrant)
       );
-      if (state.grant && !response.ok) {
+      if (!isCurrentGrant(requestGrant)) return;
+      if (requestGrant && !response.ok) {
         const code = await responseErrorCode(response);
+        if (!isCurrentGrant(requestGrant)) return;
         if (shouldRetryAnnotateReadWithoutGrant(response, code)) {
           clearStoredGrant(windowRef, config, sourceKey);
           state.grant = '';
+          requestGrant = '';
           response = await fetchImpl(buildAnnotateCommentsUrl(config, context), annotateRequestInit({ method: 'GET' }));
+          if (!isCurrentGrant(requestGrant)) return;
         }
-      }
-      if (response.status === 401 && state.grant) {
-        clearStoredGrant(windowRef, config, sourceKey);
-        state.grant = '';
-        response = await fetchImpl(buildAnnotateCommentsUrl(config, context), annotateRequestInit({ method: 'GET' }));
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
+      if (!isCurrentGrant(requestGrant)) return;
       state.comments = Array.isArray(data && data.comments) ? data.comments : [];
       renderComments(documentRef, list, state.comments, state, renderForm);
       setStatus('');
     } catch (_) {
+      if (!isCurrentGrant(requestGrant)) return;
       list.textContent = '';
       setStatus('Unable to load comments.');
     }
@@ -483,8 +494,9 @@ export function mountAnnotateComments(options = {}) {
       category: config.discussionCategory,
       articleKey: context.articleKey
     });
-    const popupName = 'press-annotate-login';
+    const popupName = `press-annotate-login-${windowRef.crypto.randomUUID()}`;
     const popup = windowRef.open('', popupName, 'popup,width=520,height=720');
+    loginPopup = popup;
     if (!popup) setStatus('Allow popups to sign in with GitHub.');
     else if (documentRef && typeof documentRef.createElement === 'function' && documentRef.body) {
       const link = documentRef.createElement('a');
@@ -504,10 +516,13 @@ export function mountAnnotateComments(options = {}) {
   refreshButton.addEventListener('click', () => { loadComments(); });
 
   function handleGrantMessage(event) {
+    if (disposed || !loginPopup || event.source !== loginPopup) return;
+    if (resolveAnnotateSourceKey(windowRef) !== sourceKey) return;
     const expected = config.connectBaseUrl;
     if (event.origin !== expected) return;
     const data = event.data || {};
     if (data.source !== 'ekily-connect' || data.type !== 'press-annotate-grant') return;
+    loginPopup = null;
     const grantToken = normalizeGrantToken(data.grant);
     if (!data.ok || !grantToken) {
       setStatus('GitHub sign in failed.');
@@ -519,10 +534,10 @@ export function mountAnnotateComments(options = {}) {
   }
 
   windowRef.addEventListener('message', handleGrantMessage);
-  let disposed = false;
   const disposeAnnotateListener = () => {
     if (disposed) return;
     disposed = true;
+    loginPopup = null;
     try { windowRef.removeEventListener('message', handleGrantMessage); } catch (_) {}
     try {
       if (section.__pressAnnotateDispose === disposeAnnotateListener) section.__pressAnnotateDispose = null;

@@ -175,9 +175,11 @@ function writeStoredGrant(windowRef, config, grant, sourceKey = '') {
 
 function clearStoredGrant(windowRef, config, sourceKey, expectedGrant) {
   try {
-    if (readStoredGrant(windowRef, config, sourceKey) !== expectedGrant) return;
-    windowRef.localStorage.removeItem(getGrantStorageKey(config, sourceKey));
+    if (readStoredGrant(windowRef, config, sourceKey) === expectedGrant) {
+      windowRef.localStorage.removeItem(getGrantStorageKey(config, sourceKey));
+    }
   } catch (_) {}
+  return readStoredGrant(windowRef, config, sourceKey);
 }
 
 function annotateRequestInit(init = {}, grant = '') {
@@ -407,18 +409,16 @@ export function mountAnnotateComments(options = {}) {
     });
     if (!isCurrentGrant(requestGrant)) return response.ok;
     if (response.status === 401) {
-      clearStoredGrant(windowRef, config, sourceKey, requestGrant);
-      state.grant = '';
-      setStatus('Session expired. Sign in again.');
+      state.grant = clearStoredGrant(windowRef, config, sourceKey, requestGrant);
+      setStatus(state.grant ? 'Your sign-in was refreshed. Try your comment again.' : 'Session expired. Sign in again.');
       return false;
     }
     if (!response.ok) {
       const code = await responseErrorCode(response);
       if (!isCurrentGrant(requestGrant)) return false;
       if (shouldClearAnnotateGrant(response, code)) {
-        clearStoredGrant(windowRef, config, sourceKey, requestGrant);
-        state.grant = '';
-        setStatus('Sign in again from this page.');
+        state.grant = clearStoredGrant(windowRef, config, sourceKey, requestGrant);
+        setStatus(state.grant ? 'Your sign-in was refreshed. Try your comment again.' : 'Sign in again from this page.');
         return false;
       }
     }
@@ -468,10 +468,9 @@ export function mountAnnotateComments(options = {}) {
         const code = await responseErrorCode(response);
         if (!isCurrentGrant(requestGrant)) return;
         if (shouldRetryAnnotateReadWithoutGrant(response, code)) {
-          clearStoredGrant(windowRef, config, sourceKey, requestGrant);
-          state.grant = '';
-          requestGrant = '';
-          response = await fetchImpl(buildAnnotateCommentsUrl(config, context), annotateRequestInit({ method: 'GET' }));
+          state.grant = clearStoredGrant(windowRef, config, sourceKey, requestGrant);
+          requestGrant = state.grant;
+          response = await fetchImpl(buildAnnotateCommentsUrl(config, context), annotateRequestInit({ method: 'GET' }, requestGrant));
           if (!isCurrentGrant(requestGrant)) return;
         }
       }

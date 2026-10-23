@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import {
   buildAnnotateCommentPayload,
   buildAnnotateCommentsUrl,
@@ -603,11 +605,14 @@ for (const phase of ['response', 'error-body', 'fallback']) {
   const firstDocument = new FakeDocument();
   const firstWindow = createWindow({ [defaultGrantStorageKey]: JSON.stringify({ grant: 'stale-grant' }) });
   const delayed = deferred();
-  let firstRequests = 0;
+  const firstRequests = [];
   mountAnnotateComments({ document: firstDocument, window: firstWindow,
     container: firstDocument.createElement('main'), siteConfig, context,
-    fetchImpl: async () => ++firstRequests === 1 ? delayed.promise
-      : ({ ok: true, json: async () => ({ comments: [] }) }) });
+    fetchImpl: async (url, init) => {
+      firstRequests.push(init);
+      return firstRequests.length === 1 ? delayed.promise
+        : ({ ok: true, json: async () => ({ comments: [] }) });
+    } });
   const secondDocument = new FakeDocument();
   const secondWindow = createWindow();
   secondWindow.localStorage = firstWindow.localStorage;
@@ -623,6 +628,7 @@ for (const phase of ['response', 'error-body', 'fallback']) {
   delayed.resolve({ ok: false, status: 401, json: async () => ({}) });
   await flushMicrotasks(12);
   assert.match(firstWindow.localStorage.getItem(defaultGrantStorageKey), /fresh-grant/);
+  assert.equal(firstRequests[1].headers.authorization, 'Bearer fresh-grant');
   section.children[0].children[1].children[1].eventListeners.click();
   await flushMicrotasks();
   assert.equal(requests.at(-1).headers.authorization, 'Bearer fresh-grant');
@@ -656,6 +662,54 @@ for (const phase of ['response', 'error-body', 'fallback']) {
   assert.equal(list.children.length, 1);
   assert.equal(section.children.find(child => child.className === 'press-annotate__status').textContent,
     'Signed in with GitHub.');
+}
+
+// A failed POST adopts a token replaced in another tab; the same form can
+// retry with that token and its original draft without a new OAuth flow.
+{
+  const document = new FakeDocument();
+  const window = createWindow({ [defaultGrantStorageKey]: JSON.stringify({ grant: 'stale-grant' }) });
+  const otherWindow = createWindow();
+  otherWindow.localStorage = window.localStorage;
+  const delayed = deferred();
+  const posts = [];
+  const section = mountAnnotateComments({ document, window, container: document.createElement('main'),
+    siteConfig, context, fetchImpl: async (url, init) => {
+      if (init.method === 'POST') {
+        posts.push(init);
+        return posts.length === 1 ? delayed.promise : { ok: true, status: 201 };
+      }
+      return { ok: true, json: async () => ({ comments: [] }) };
+    } });
+  await flushMicrotasks();
+  const form = section.children.find(child => child.className === 'press-annotate__form');
+  form.children[0].value = 'Retry this draft';
+  const submission = form.eventListeners.submit({ preventDefault() {} });
+  otherWindow.localStorage.setItem(defaultGrantStorageKey, JSON.stringify({ grant: 'fresh-grant' }));
+  delayed.resolve({ ok: false, status: 401 });
+  await submission;
+  assert.equal(form.children[0].value, 'Retry this draft');
+  assert.match(section.children.find(child => child.className === 'press-annotate__status').textContent, /refreshed/);
+  await form.eventListeners.submit({ preventDefault() {} });
+  assert.equal(posts[1].headers.authorization, 'Bearer fresh-grant');
+  assert.equal(form.children[0].value, '');
+}
+
+// The editor's fallback-generated HTML must retain the same fresh main
+// entry URL, and returning editors must discover the changed Composer.
+{
+  const composer = readFileSync(new URL('../assets/js/composer.js', import.meta.url), 'utf8');
+  const functionStart = composer.indexOf('function buildDefaultIndexHtml(');
+  const functionEnd = composer.indexOf('function generateSeoIndexHtml(', functionStart);
+  const buildDefaultIndexHtml = runInNewContext(`(${composer.slice(functionStart, functionEnd)})`, {
+    normalizeSeoLangCode: value => value, escapeSeoHtml: value => value
+  });
+  const entryUrl = html => /src="(assets\/main\.js\?v=[^"]+)"/.exec(html)[1];
+  const installed = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.equal(entryUrl(buildDefaultIndexHtml('', 'en')), entryUrl(installed));
+  const editor = readFileSync(new URL('../index_editor.html', import.meta.url), 'utf8');
+  const composerUrl = /src="(assets\/js\/composer\.js\?v=[^"]+)"/.exec(editor)[1];
+  assert.equal(composerUrl.split('?')[1], entryUrl(installed).split('?')[1]);
 }
 
 console.log('ok - annotate runtime, popup correlation, and authorization races');

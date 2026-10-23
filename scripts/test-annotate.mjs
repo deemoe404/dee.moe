@@ -597,4 +597,35 @@ for (const phase of ['response', 'error-body', 'fallback']) {
   assert.match(window.localStorage.getItem(defaultGrantStorageKey), /fresh-grant/);
 }
 
+// Separate tabs share persisted grants but retain separate in-memory state.
+// An expired request in one tab must not delete a newer login in the other.
+{
+  const firstDocument = new FakeDocument();
+  const firstWindow = createWindow({ [defaultGrantStorageKey]: JSON.stringify({ grant: 'stale-grant' }) });
+  const delayed = deferred();
+  let firstRequests = 0;
+  mountAnnotateComments({ document: firstDocument, window: firstWindow,
+    container: firstDocument.createElement('main'), siteConfig, context,
+    fetchImpl: async () => ++firstRequests === 1 ? delayed.promise
+      : ({ ok: true, json: async () => ({ comments: [] }) }) });
+  const secondDocument = new FakeDocument();
+  const secondWindow = createWindow();
+  secondWindow.localStorage = firstWindow.localStorage;
+  const requests = [];
+  const section = mountAnnotateComments({ document: secondDocument, window: secondWindow,
+    container: secondDocument.createElement('main'), siteConfig, context,
+    fetchImpl: async (url, init) => {
+      requests.push(init);
+      return { ok: true, json: async () => ({ comments: [] }) };
+    } });
+  await flushMicrotasks();
+  receiveGrant(secondWindow, startLogin(section, secondWindow));
+  delayed.resolve({ ok: false, status: 401, json: async () => ({}) });
+  await flushMicrotasks(12);
+  assert.match(firstWindow.localStorage.getItem(defaultGrantStorageKey), /fresh-grant/);
+  section.children[0].children[1].children[1].eventListeners.click();
+  await flushMicrotasks();
+  assert.equal(requests.at(-1).headers.authorization, 'Bearer fresh-grant');
+}
+
 console.log('ok - annotate runtime, popup correlation, and authorization races');

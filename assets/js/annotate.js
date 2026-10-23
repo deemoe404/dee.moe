@@ -455,7 +455,7 @@ export function mountAnnotateComments(options = {}) {
     return form;
   }
 
-  async function loadComments() {
+  async function loadComments(successStatus = '') {
     let requestGrant = state.grant;
     setStatus('Loading comments...');
     try {
@@ -480,7 +480,7 @@ export function mountAnnotateComments(options = {}) {
       if (!isCurrentGrant(requestGrant)) return;
       state.comments = Array.isArray(data && data.comments) ? data.comments : [];
       renderComments(documentRef, list, state.comments, state, renderForm);
-      setStatus('');
+      setStatus(requestGrant ? successStatus : '');
     } catch (_) {
       if (!isCurrentGrant(requestGrant)) return;
       list.textContent = '';
@@ -533,7 +533,7 @@ export function mountAnnotateComments(options = {}) {
     }
     state.grant = grantToken;
     writeStoredGrant(windowRef, config, state.grant, sourceKey);
-    setStatus('Signed in with GitHub.');
+    loadComments('Signed in with GitHub.');
   }
 
   windowRef.addEventListener('message', handleGrantMessage);

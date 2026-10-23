@@ -628,4 +628,34 @@ for (const phase of ['response', 'error-body', 'fallback']) {
   assert.equal(requests.at(-1).headers.authorization, 'Bearer fresh-grant');
 }
 
+// Login must replace a superseded initial read with an authenticated read,
+// so existing comments appear without requiring a manual refresh.
+{
+  const document = new FakeDocument();
+  const window = createWindow();
+  const delayed = deferred();
+  const requests = [];
+  const section = mountAnnotateComments({ document, window, container: document.createElement('main'),
+    siteConfig, context,
+    fetchImpl: async (url, init) => {
+      requests.push(init);
+      if (requests.length === 1) return delayed.promise;
+      return { ok: true, json: async () => ({ comments: [
+        { id: 'existing-comment', body: 'Visible after sign-in', replies: [] }
+      ] }) };
+    } });
+  receiveGrant(window, startLogin(section, window));
+  await flushMicrotasks(12);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].headers.authorization, 'Bearer fresh-grant');
+  const list = section.children.find(child => child.className === 'press-annotate__list');
+  assert.equal(list.children[0].children.find(child => child.className === 'press-annotate__body').textContent,
+    'Visible after sign-in');
+  delayed.resolve({ ok: true, json: async () => ({ comments: [] }) });
+  await flushMicrotasks(12);
+  assert.equal(list.children.length, 1);
+  assert.equal(section.children.find(child => child.className === 'press-annotate__status').textContent,
+    'Signed in with GitHub.');
+}
+
 console.log('ok - annotate runtime, popup correlation, and authorization races');
